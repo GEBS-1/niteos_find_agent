@@ -1,13 +1,13 @@
-"""Multi-path building owner / UK discovery.
+"""Cheap, evidence-first building -> legal entity resolver.
 
-Paths (any can win; results are merged and scored later):
-1. DaData party suggest by building title / street / UK phrases
-2. Web search (Bing + DuckDuckGo) → extract ИНН from pages/snippets
-3. List-Org name search → ИНН from HTML
-4. Resolve every ИНН via DaData findById for a full party card
+The mass hunt must not depend on an LLM.  This module gathers candidates from
+DaData, List-Org and free web search, hydrates them through DaData and ranks
+them with deterministic evidence.  RouterAI is an optional last resort only
+when HUNT_CHEAP_MODE=0 and HUNT_LLM_OWNER=1.
 
-ЕГРН/Росреестр ownership for third parties is restricted — we do not pretend
-to have cadastral owner proof without a paid licensed API key.
+Public data can prove that a company is plausibly connected to an object, but
+it must not be presented as cadastral ownership proof unless such proof comes
+from an authorised property source.
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 
 from app.contacts import _bing_links, _ddg_links
+from app.cost_guard import llm_owner_enabled
 from app.dadata import DaData
 from app.enrich import enrich_from_dadata
 
@@ -27,9 +28,47 @@ log = logging.getLogger(__name__)
 
 _INN_RE = re.compile(r"(?<!\d)(\d{10}|\d{12})(?!\d)")
 _INN_URL_RE = re.compile(
-    r"(?:inn[=/]|type=inn[^\d]{0,20}|val=|/id/)(\d{10}|\d{12})",
-    flags=re.I,
+    r"(?:inn[=/]|type=inn[^\d]{0,20}|val=|/id/)(\d{10}|\d{12})", re.I
 )
+_WORD_RE = re.compile(r"[a-zа-яё0-9]{3,}", re.I)
+
+_FUEL_BRANDS = (
+    "татнефть",
+    "лукойл",
+    "газпромнефть",
+    "газпром нефть",
+    "роснефть",
+    "башнефть",
+    "нефтьмагистраль",
+    "ирбис",
+    "shell",
+    "шелл",
+)
+
+_STOP_WORDS = {
+    "ооо",
+    "ао",
+    "пао",
+    "зао",
+    "оао",
+    "ип",
+    "торговый",
+    "центр",
+    "бизнес",
+    "компания",
+    "общество",
+    "здание",
+    "объект",
+    "город",
+}
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").lower().replace("ё", "е")).strip()
+
+
+def _tokens(text: str) -> set[str]:
+    return {t for t in _WORD_RE.findall(_norm(text)) if t not in _STOP_WORDS}
 
 
 def _uniq_inns(items: list[str], limit: int = 12) -> list[str]:
@@ -39,7 +78,6 @@ def _uniq_inns(items: list[str], limit: int = 12) -> list[str]:
         inn = re.sub(r"\D", "", str(raw or ""))
         if len(inn) not in (10, 12) or inn in seen:
             continue
-        # Skip obvious non-INNs (years, phones stubs)
         if inn.startswith(("0000", "1111", "1234")):
             continue
         seen.add(inn)
@@ -50,205 +88,115 @@ def _uniq_inns(items: list[str], limit: int = 12) -> list[str]:
 
 
 def _extract_inns_from_text(text: str) -> list[str]:
-    found: list[str] = []
-    for m in _INN_URL_RE.finditer(text or ""):
-        found.append(m.group(1))
-    for m in _INN_RE.finditer(text or ""):
-        # Prefer ИНН near ownership keywords when present
-        found.append(m.group(1))
-    return _uniq_inns(found, 20)
+    values = [m.group(1) for m in _INN_URL_RE.finditer(text or "")]
+    values.extend(m.group(1) for m in _INN_RE.finditer(text or ""))
+    return _uniq_inns(values, 20)
 
 
 def _street_hint(address: str) -> str:
-    for m in re.finditer(
-        r"(?:ул\.?|улица|пр\.?|проспект|пер\.?|переулок)\s*[A-Za-zА-Яа-яЁё0-9\-\s]{3,40}",
+    m = re.search(
+        r"(?:ул\.?|улица|пр\.?|проспект|пер\.?|переулок|шоссе|наб\.?|набережная)"
+        r"\s*[A-Za-zА-Яа-яЁё0-9\-\s]{3,50}",
         address or "",
-        flags=re.I,
-    ):
-        return m.group(0).strip()
-    return ""
-
-
-def _is_school_title(title: str) -> bool:
-    t = (title or "").lower().replace("ё", "е")
-    return any(
-        w in t
-        for w in (
-            "школ",
-            "лицей",
-            "гимнази",
-            "мбоу",
-            "маоу",
-            "сош",
-            "колледж",
-            "техникум",
-            "детский сад",
-        )
+        re.I,
     )
+    return m.group(0).strip() if m else ""
 
 
-_FUEL_BRANDS = (
-    "татнефть",
-    "лукойл",
-    "газпромнефть",
-    "газпром нефть",
-    "роснефть",
-    "башнефть",
-    "shell",
-    "шелл",
-    "нефтьмагистраль",
-    "ирбис",
-    "аспект",
-)
-
-
-def _is_azs_title(title: str) -> bool:
-    t = (title or "").lower().replace("ё", "е")
-    return any(w in t for w in ("азс", "заправк", "автозаправ")) or any(
-        b in t for b in _FUEL_BRANDS
-    )
-
-
-def _azs_brand(title: str) -> str:
-    t = (title or "").lower().replace("ё", "е")
-    for b in _FUEL_BRANDS:
-        if b in t:
-            return b
-    return ""
-
-
-def _street_from_title(title: str) -> str:
-    """OSM often names POIs as «АЗС (улица …)» — pull street out of parens."""
-    m = re.search(r"\(([^)]{4,60})\)", title or "")
-    if not m:
-        return ""
-    inner = m.group(1).strip()
-    low = inner.lower().replace("ё", "е")
-    if any(
-        w in low
-        for w in ("ул", "улиц", "пр", "проспект", "пер", "шоссе", "набереж")
-    ):
-        return inner
-    return ""
-
-
-def _azs_owner_queries(title: str, city: str, street: str) -> list[str]:
-    brand = _azs_brand(title)
-    street = street or _street_from_title(title)
-    q: list[str] = []
-    if brand:
-        q.extend(
-            [
-                f"{brand} азс {city}".strip(),
-                f"азс {brand} {city}".strip(),
-                f"{brand} {city}".strip(),
-                f"ооо {brand} {city}".strip(),
-            ]
-        )
-    if street:
-        q.extend(
-            [
-                f"азс {street} {city}".strip(),
-                f"автозаправка {street} {city}".strip(),
-                f"{street} азс".strip(),
-            ]
-        )
-    q.extend(
-        [
-            f"{title} {city}".strip(),
-            f"азс {city}".strip(),
-            title,
-        ]
-    )
-    out: list[str] = []
-    seen: set[str] = set()
-    for item in q:
-        key = item.lower().strip()
-        if not key or key in seen or len(key) < 4:
-            continue
-        seen.add(key)
-        out.append(item.strip())
-    return out[:12]
-
-
-def _quoted_building_name(title: str) -> str:
-    m = re.search(r"[«\"„]([^»\"“]{3,60})[»\"“]", title or "")
+def _house_hint(address: str) -> str:
+    m = re.search(r"(?:д\.?|дом)\s*(\d+[а-яa-z]?(?:/\d+)?)", _norm(address), re.I)
     return (m.group(1) if m else "").strip()
-
-
-def _is_warehouse_title(title: str) -> bool:
-    t = (title or "").lower().replace("ё", "е")
-    return any(w in t for w in ("склад", "логист", "терминал", "рц ", " рц"))
-
-
-def _warehouse_owner_queries(title: str, city: str, street: str) -> list[str]:
-    quoted = _quoted_building_name(title)
-    q: list[str] = []
-    if quoted:
-        q.extend(
-            [
-                f"{quoted} {city}".strip(),
-                f"ООО {quoted}",
-                f"склад {quoted} {city}".strip(),
-                f"{quoted} склад",
-                f"УК {quoted}",
-            ]
-        )
-    q.extend(
-        [
-            f"{title} {city}".strip(),
-            title,
-            f"склад {city} {street}".strip() if street else f"склад {city}".strip(),
-        ]
-    )
-    if street:
-        q.append(f"{street} {city} склад".strip())
-    out: list[str] = []
-    seen: set[str] = set()
-    for item in q:
-        key = item.lower().strip()
-        if not key or key in seen or len(key) < 4:
-            continue
-        seen.add(key)
-        out.append(item.strip())
-    return out[:12]
 
 
 def _school_number(text: str) -> str:
     m = re.search(
         r"(?:№|n|номер)\s*(\d{1,4})\b|\b(\d{1,4})\s*(?:школ|сош|лицей|гимнази)",
-        (text or "").lower().replace("ё", "е"),
-        flags=re.I,
+        _norm(text),
+        re.I,
     )
-    if not m:
-        return ""
-    return m.group(1) or m.group(2) or ""
+    return (m.group(1) or m.group(2) or "") if m else ""
 
 
-def _school_owner_queries(title: str, city: str, street: str) -> list[str]:
-    """Schools are usually the legal entity themselves (МБОУ/МАОУ), not a mall UK."""
-    num = _school_number(title)
-    queries = [
-        title,
-        f"{title} {city}".strip(),
-        f"МБОУ {title} {city}".strip(),
-        f"МАОУ {title} {city}".strip(),
-        f"{title} {city} образовательное".strip(),
-    ]
-    if num:
+def _is_school(title: str) -> bool:
+    t = _norm(title)
+    return any(x in t for x in ("школ", "лицей", "гимнази", "мбоу", "маоу", "сош", "детский сад"))
+
+
+def _is_warehouse(title: str) -> bool:
+    t = _norm(title)
+    return any(x in t for x in ("склад", "логист", "терминал", "распределительный центр", " рц"))
+
+
+def _is_azs(title: str) -> bool:
+    t = _norm(title)
+    return any(x in t for x in ("азс", "заправ", "автозаправ")) or any(b in t for b in _FUEL_BRANDS)
+
+
+def _is_sport(title: str) -> bool:
+    t = _norm(title)
+    return any(x in t for x in ("стадион", "арена", "спорт", "бассейн", "дворец спорта"))
+
+
+def _quoted_name(title: str) -> str:
+    m = re.search(r"[«\"„]([^»\"“]{3,60})[»\"“]", title or "")
+    return (m.group(1) if m else "").strip()
+
+
+def _brand(title: str) -> str:
+    t = _norm(title)
+    for brand in _FUEL_BRANDS:
+        if brand in t:
+            return brand
+    return ""
+
+
+def _owner_queries(title: str, address: str, city: str) -> list[str]:
+    street = _street_hint(address)
+    quoted = _quoted_name(title)
+    queries: list[str] = []
+
+    if _is_school(title):
+        number = _school_number(title)
+        queries.extend((title, f"{title} {city}".strip(), f"МБОУ {title} {city}".strip(), f"МАОУ {title} {city}".strip()))
+        if number:
+            queries.extend((f"школа №{number} {city}".strip(), f"МБОУ школа №{number} {city}".strip()))
+    elif _is_azs(title):
+        brand = _brand(title)
+        if brand:
+            queries.extend((f"{brand} АЗС {city}".strip(), f"ООО {brand} {city}".strip(), f"{brand} {city}".strip()))
+        queries.extend((f"{title} {city}".strip(), title))
+    elif _is_warehouse(title):
+        if quoted:
+            queries.extend((f"{quoted} {city}".strip(), f"ООО {quoted}", f"склад {quoted} {city}".strip()))
+        queries.extend((f"{title} {city}".strip(), title))
+    else:
         queries.extend(
-            [
-                f"МБОУ школа №{num} {city}".strip(),
-                f"МАОУ школа №{num} {city}".strip(),
-                f"школа №{num} {city}".strip(),
-                f"средняя школа №{num} {city}".strip(),
-            ]
+            (
+                f"{title} {city}".strip(),
+                f"{title} управляющая компания",
+                f"УК {title}",
+                f"{title} собственник",
+                title,
+            )
         )
+        if _is_sport(title):
+            queries.extend((f"МБУ {title} {city}".strip(), f"МУП {title} {city}".strip(), f"дирекция {title} {city}".strip()))
+
     if street:
-        queries.append(f"{title} {street}".strip())
-        if num:
-            queries.append(f"школа №{num} {street}".strip())
-    return [q for q in queries if q and len(q) >= 3]
+        queries.extend((f"{title} {street}", f"{street} {city}".strip()))
+    if address:
+        queries.append(" ".join(x.strip() for x in address.split(",")[:3] if x.strip()))
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for q in queries:
+        q = re.sub(r"\s+", " ", q).strip()
+        key = _norm(q)
+        if len(key) < 3 or key in seen:
+            continue
+        seen.add(key)
+        out.append(q)
+    return out[:12]
 
 
 async def _path_dadata(
@@ -259,485 +207,305 @@ async def _path_dadata(
     city: str,
     locations: list[dict] | None,
 ) -> list[dict[str, Any]]:
-    street = _street_hint(address) or _street_from_title(title)
-    if _is_school_title(title):
-        queries = _school_owner_queries(title, city, street)
-    elif _is_azs_title(title):
-        # Fuel stations are brand/operator entities, not mall UK
-        queries = _azs_owner_queries(title, city, street)
-    elif _is_warehouse_title(title):
-        queries = _warehouse_owner_queries(title, city, street)
-    else:
-        queries = [
-            f"{title} управляющая компания",
-            f"УК {title}",
-            f"{title} собственник",
-            f"{title} {city}".strip(),
-            f"ТЦ {title}".strip(),
-            f"ТРЦ {title}".strip(),
-            title,
-        ]
-        title_l = title.lower().replace("ё", "е")
-        if any(w in title_l for w in ("стадион", "спорт", "арена", "дворец спорта", "бассейн")):
-            queries = [
-                title,
-                f"{title} {city}".strip(),
-                f"МУП {title} {city}".strip(),
-                f"МБУ {title} {city}".strip(),
-                f"дирекция {title} {city}".strip(),
-                f"{title} {city} спортивное".strip(),
-                f"стадион {city} {street}".strip() if street else f"стадион {city}",
-            ] + queries
-        if street:
-            queries.extend(
-                [
-                    f"{title} {street}",
-                    f"{street} {city}".strip(),
-                    f"управляющая компания {street}",
-                ]
-            )
-        if address:
-            queries.append(" ".join(address.split(",")[:2]).strip())
-
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for dq in queries:
-        if not dq or len(dq) < 3:
-            continue
+    for query in _owner_queries(title, address, city):
         try:
-            batch = await dadata.suggest(dq, count=8, locations=locations)
+            batch = await dadata.suggest(query, count=8, locations=locations)
             if not batch:
-                batch = await dadata.suggest(dq, count=8)
+                batch = await dadata.suggest(query, count=8)
         except Exception as exc:
-            log.info("owner dadata path failed %s: %s", dq[:40], exc)
+            log.info("owner dadata failed for %s: %s", query[:60], exc)
             continue
-        for item in batch or []:
-            data = item.get("data") or {}
+        for suggest in batch or []:
+            data = suggest.get("data") or {}
             inn = str(data.get("inn") or "")
             if not inn or inn in seen:
                 continue
             seen.add(inn)
-            out.append(
-                {
-                    "inn": inn,
-                    "source": "dadata",
-                    "query": dq,
-                    "suggest": item,
-                }
-            )
+            out.append({"inn": inn, "source": "dadata", "query": query, "suggest": suggest})
+        if len(out) >= 18:
+            break
     return out
 
 
-async def _path_web_search(
-    http: httpx.AsyncClient, *, title: str, city: str, street: str
-) -> list[dict[str, Any]]:
-    if _is_school_title(title):
-        num = _school_number(title)
-        queries = [
-            f'"{title}" {city} МБОУ ИНН',
-            f'"{title}" {city} ИНН',
-            f'"{title}" {city} официальный сайт',
-            f"{title} {city} rusprofile",
-        ]
-        if num:
-            queries.insert(0, f'"школа №{num}" {city} МБОУ ИНН')
-            queries.append(f'"школа №{num}" {city} ИНН')
-        if street:
-            queries.append(f'"{title}" {street} ИНН')
-    elif _is_azs_title(title):
-        brand = _azs_brand(title)
-        street = street or _street_from_title(title)
-        queries = [
-            f'азс {street} {city} ИНН'.strip() if street else f'азс {city} ИНН',
-            f'"{title}" {city} ИНН',
-            f"{title} {city} rusprofile",
-        ]
-        if brand:
-            queries.insert(0, f'азс {brand} {city} ИНН')
-            queries.insert(1, f'{brand} азс {city} ИНН')
-    elif _is_warehouse_title(title):
-        quoted = _quoted_building_name(title)
-        queries = [
-            f'"{title}" {city} ИНН',
-            f"{title} {city} rusprofile",
-            f'"{quoted}" {city} ИНН' if quoted else f'склад {city} ИНН',
-        ]
-        if quoted:
-            queries.insert(0, f'"{quoted}" склад {city} ИНН')
-            queries.insert(1, f'ООО "{quoted}" {city}')
-    else:
-        queries = [
-            f'"{title}" {city} управляющая компания ИНН',
-            f'"{title}" {city} собственник ИНН',
-            f"{title} {city} rusprofile",
-        ]
-        if street:
-            queries.append(f'"{title}" {street} ИНН')
+async def _path_list_org(http: httpx.AsyncClient, *, title: str, city: str) -> list[dict[str, Any]]:
+    queries = [f"{title} {city}".strip(), title]
+    if _is_school(title) and _school_number(title):
+        queries.insert(0, f"школа №{_school_number(title)} {city}".strip())
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for query in queries:
+        try:
+            resp = await http.get(
+                "https://www.list-org.com/search",
+                params={"type": "all", "val": query},
+                timeout=12.0,
+            )
+        except Exception:
+            continue
+        if resp.status_code >= 400 or not resp.text:
+            continue
+        html = resp.text[:220_000]
+        for inn in _extract_inns_from_text(html):
+            if inn in seen:
+                continue
+            seen.add(inn)
+            out.append({"inn": inn, "source": "list-org", "query": query, "suggest": None})
+            if len(out) >= 8:
+                return out
+        if out:
+            break
+    return out
+
+
+async def _path_web(http: httpx.AsyncClient, *, title: str, address: str, city: str) -> list[dict[str, Any]]:
+    street = _street_hint(address)
+    queries = [
+        f'"{title}" {city} ИНН',
+        f'"{title}" {city} управляющая компания ИНН',
+        f'"{title}" {city} собственник ИНН',
+    ]
+    if _is_school(title):
+        queries = [f'"{title}" {city} МБОУ ИНН', f'"{title}" {city} ИНН'] + queries[:1]
+    elif _is_azs(title) and _brand(title):
+        queries.insert(0, f'{_brand(title)} АЗС {city} ИНН')
+    elif _is_warehouse(title):
+        queries.insert(0, f'"{title}" {city} склад ИНН')
+    if street:
+        queries.append(f'"{title}" "{street}" ИНН')
 
     inns: list[str] = []
-    pages_fetched = 0
-    from app.websearch import web_search_links
+    fetched_pages = 0
+    try:
+        from app.websearch import web_search_links
+    except Exception:
+        web_search_links = None
 
-    for q in queries[:4]:
+    for query in queries[:4]:
         links: list[str] = []
-        try:
-            links.extend(await web_search_links(http, q, num=8))
-        except Exception:
-            pass
-        if len(links) < 3:
+        if web_search_links is not None:
             try:
-                links.extend(await _bing_links(http, q))
+                links.extend(await web_search_links(http, query, num=6))
             except Exception:
                 pass
         if len(links) < 3:
             try:
-                links.extend(await _ddg_links(http, q))
+                links.extend(await _bing_links(http, query))
             except Exception:
                 pass
-        for url in links[:8]:
+        if len(links) < 3:
+            try:
+                links.extend(await _ddg_links(http, query))
+            except Exception:
+                pass
+
+        for url in links[:7]:
             inns.extend(_extract_inns_from_text(url))
-            if pages_fetched >= 3:
+            if fetched_pages >= 3:
                 continue
             host = ""
             try:
                 from urllib.parse import urlparse
-
                 host = (urlparse(url).netloc or "").lower()
             except Exception:
-                continue
-            if not any(
-                h in host
-                for h in ("list-org.", "rusprofile.", "sbis.", "checko.")
-            ):
+                pass
+            if not any(x in host for x in ("list-org.", "rusprofile.", "checko.", "sbis.")):
                 continue
             try:
                 resp = await http.get(url, timeout=8.0)
             except Exception:
                 continue
-            pages_fetched += 1
-            if resp.status_code >= 400 or not resp.text:
-                continue
-            chunk = resp.text[:80_000]
-            inns.extend(_extract_inns_from_text(chunk))
-            for m in re.finditer(
-                r"ИНН[^0-9]{0,12}(\d{10}|\d{12})", chunk, flags=re.I
-            ):
-                inns.append(m.group(1))
+            fetched_pages += 1
+            if resp.status_code < 400 and resp.text:
+                inns.extend(_extract_inns_from_text(resp.text[:100_000]))
 
-    out = []
-    for inn in _uniq_inns(inns, 8):
-        out.append({"inn": inn, "source": "web", "query": title, "suggest": None})
-    return out
+    return [{"inn": inn, "source": "web", "query": title, "suggest": None} for inn in _uniq_inns(inns, 8)]
 
 
-async def _path_list_org(
-    http: httpx.AsyncClient, *, title: str, city: str
-) -> list[dict[str, Any]]:
-    queries = [f"{title} {city}".strip(), title]
-    if _is_school_title(title):
-        num = _school_number(title)
-        queries = [
-            f"МБОУ {title} {city}".strip(),
-            f"МАОУ {title} {city}".strip(),
-            f"{title} {city}".strip(),
-            title,
-        ]
-        if num:
-            queries.insert(0, f"школа №{num} {city}".strip())
+async def _hydrate(dadata: DaData, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for q in queries:
-        if not q or len(q) < 3:
-            continue
-        try:
-            resp = await http.get(
-                "https://www.list-org.com/search",
-                params={"type": "all", "val": q},
-                timeout=15.0,
-            )
-        except Exception as exc:
-            log.info("list-org search failed: %s", exc)
-            continue
-        if resp.status_code >= 400 or not resp.text:
-            continue
-        html = resp.text[:200_000]
-        for m in re.finditer(
-            r"href=['\"]/company/(\d+)['\"]([\s\S]{0,500})", html, flags=re.I
-        ):
-            ctx = m.group(0)
-            for inn in _extract_inns_from_text(ctx):
-                if inn in seen:
-                    continue
-                ctx_l = ctx.lower().replace("ё", "е")
-                title_l = title.lower().replace("ё", "е")
-                token_hit = any(
-                    t in ctx_l
-                    for t in re.findall(r"[а-яa-z0-9]{4,}", title_l)[:4]
-                )
-                city_hit = (city or "").lower().replace("ё", "е") in ctx_l
-                if not (token_hit or city_hit or not city):
-                    continue
-                seen.add(inn)
-                out.append(
-                    {
-                        "inn": inn,
-                        "source": "list-org",
-                        "query": q,
-                        "suggest": None,
-                        "list_org_id": m.group(1),
-                    }
-                )
-        # Fallback: any INN on the search page labeled as ИНН
-        for m in re.finditer(r"ИНН[^0-9]{0,12}(\d{10}|\d{12})", html, flags=re.I):
-            inn = m.group(1)
-            if inn not in seen:
-                seen.add(inn)
-                out.append(
-                    {"inn": inn, "source": "list-org", "query": q, "suggest": None}
-                )
-        if out:
-            break
-    return out[:10]
-
-
-async def _hydrate_inns(
-    dadata: DaData, candidates: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Attach DaData suggest payloads for INN-only hits."""
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for cand in candidates:
-        inn = str(cand.get("inn") or "")
+    for row in rows:
+        inn = str(row.get("inn") or "")
         if not inn or inn in seen:
             continue
         seen.add(inn)
-        suggest = cand.get("suggest")
+        suggest = row.get("suggest")
         if not suggest:
             try:
                 suggest = await dadata.find_by_inn(inn)
-            except Exception as exc:
-                log.info("hydrate inn %s failed: %s", inn, exc)
+            except Exception:
                 suggest = None
-        if not suggest:
-            continue
-        out.append({**cand, "suggest": suggest, "inn": inn})
+        if suggest:
+            out.append({**row, "suggest": suggest})
     return out
 
 
-def _uk_rank(item: dict[str, Any], building_title: str) -> int:
-    data = item.get("data") or {}
-    name = str(item.get("value") or data.get("name") or "").lower().replace("ё", "е")
-    okved = ""
-    if isinstance(data.get("okved"), str):
-        okved = data["okved"]
-    elif isinstance(data.get("okveds"), list) and data["okveds"]:
-        first = data["okveds"][0]
-        okved = str((first or {}).get("code") or first or "")
+def _candidate_score(cand: dict[str, Any], *, title: str, address: str, city: str) -> tuple[int, list[str]]:
+    suggest = cand.get("suggest") or {}
+    data = suggest.get("data") or {}
+    name = str(suggest.get("value") or data.get("name") or "")
+    legal_address = str(data.get("address", {}).get("value") if isinstance(data.get("address"), dict) else data.get("address") or "")
+    okved = str(data.get("okved") or "")
+    n = _norm(name)
     score = 0
-    school = _is_school_title(building_title)
-    if school:
-        if any(
-            w in name
-            for w in ("школ", "лицей", "гимнази", "мбоу", "маоу", "сош", "образован")
-        ):
-            score += 50
+    reasons: list[str] = []
+
+    source = str(cand.get("source") or "")
+    if source == "dadata":
+        score += 12
+        reasons.append("кандидат найден через DaData по объектному запросу")
+    elif source == "list-org":
+        score += 10
+        reasons.append("кандидат найден через List-Org")
+    elif source == "web":
+        score += 8
+        reasons.append("ИНН найден в веб-следах объекта")
+    elif source == "llm":
+        score += 4
+
+    overlap = _tokens(title) & _tokens(name)
+    if overlap:
+        add = min(34, 12 * len(overlap))
+        score += add
+        reasons.append("совпало название: " + ", ".join(sorted(overlap)[:3]))
+
+    quoted = _norm(_quoted_name(title))
+    if quoted and len(quoted) >= 4 and quoted in n:
+        score += 30
+        reasons.append("имя объекта присутствует в названии юрлица")
+
+    if city and _norm(city) in _norm(legal_address):
+        score += 8
+        reasons.append("совпадает город")
+
+    street = _street_hint(address)
+    house = _house_hint(address)
+    if street and _tokens(street) & _tokens(legal_address):
+        score += 18
+        reasons.append("совпадает улица")
+    if house and re.search(rf"(?:д\.?|дом)?\s*{re.escape(house)}\b", _norm(legal_address)):
+        score += 14
+        reasons.append("совпадает номер дома")
+
+    if _is_school(title):
+        number = _school_number(title)
+        if any(x in n for x in ("школ", "лицей", "гимнази", "мбоу", "маоу", "сош")):
+            score += 35
+            reasons.append("юрлицо образовательного учреждения")
+        if number and _school_number(name) == number:
+            score += 35
+            reasons.append(f"совпадает номер школы №{number}")
         if okved.startswith("85"):
+            score += 18
+            reasons.append("ОКВЭД образования")
+    elif _is_azs(title):
+        brand = _brand(title)
+        if brand and brand in n:
+            score += 36
+            reasons.append("совпадает бренд АЗС")
+        if any(x in n for x in ("нефть", "топлив", "азс", "заправ")):
+            score += 20
+            reasons.append("юрлицо топливного профиля")
+        if okved.startswith(("47.30", "46.71", "19.2")):
+            score += 18
+            reasons.append("профильный ОКВЭД АЗС")
+    elif _is_warehouse(title):
+        if any(x in n for x in ("склад", "логист", "терминал", "девелоп", "управл", "недвиж")):
+            score += 24
+            reasons.append("юрлицо складского/недвижимого профиля")
+        if okved.startswith(("52.", "68.", "41.")):
+            score += 14
+            reasons.append("профильный ОКВЭД")
+    elif _is_sport(title):
+        if any(x in n for x in ("стадион", "спорт", "арена", "мбу", "муп", "дирекция", "физкультур")):
             score += 30
-        sn_b = _school_number(building_title)
-        sn_n = _school_number(name)
-        if sn_b and sn_n and sn_b == sn_n:
-            score += 40
-        if any(w in name for w in ("торгов", "мега", "ритейл", "гипермаркет")):
-            score -= 50
+            reasons.append("похоже на оператора спортобъекта")
     else:
-        if any(w in name for w in ("управл", "ук ", "ук«", "собствен", "девелоп")):
-            score += 40
+        if any(x in n for x in ("управл", "девелоп", "недвиж", "собствен")):
+            score += 24
+            reasons.append("похоже на УК/девелопера")
         if okved.startswith(("68.32", "68.20", "68.3", "41.20")):
-            score += 25
-        if any(w in (building_title or "").lower() for w in ("стадион", "спорт", "арена", "бассейн")):
-            if any(
-                w in name
-                for w in ("стадион", "спорт", "арена", "муп", "мбу", "дирекция", "физкультур")
-            ):
-                score += 45
-            if okved.startswith(("93", "85.41", "84.")) or "93." in okved:
-                score += 25
-        if _is_azs_title(building_title):
-            if any(
-                w in name
-                for w in ("азс", "нефть", "топлив", "заправ", "бензин", *_FUEL_BRANDS)
-            ):
-                score += 50
-            if okved.startswith(("47.30", "46.71", "19.2", "47.3")):
-                score += 35
-            brand = _azs_brand(building_title)
-            if brand and brand in name:
-                score += 25
-        if _is_warehouse_title(building_title):
-            quoted = _quoted_building_name(building_title).lower().replace("ё", "е")
-            if quoted and quoted in name:
-                score += 55
-            if any(w in name for w in ("склад", "логист", "терминал", "управл", "девелоп")):
-                score += 35
-            if okved.startswith(("52.", "68.", "41.")):
-                score += 20
-    if any(w in name for w in ("магазин", "ресторан", "гостиниц", "отел", "аптек")):
-        if not _is_azs_title(building_title):
-            score -= 40
-    ot = {t for t in re.findall(r"[а-яa-z0-9]{3,}", (building_title or "").lower())}
-    nt = {t for t in re.findall(r"[а-яa-z0-9]{3,}", name)}
-    score += min(30, len(ot & nt) * 10)
-    return score
+            score += 14
+            reasons.append("ОКВЭД управления/недвижимости")
+
+    if not _is_azs(title) and any(x in n for x in ("ресторан", "аптек", "гостиниц", "отел", "магазин", "банк")):
+        score -= 30
+        reasons.append("похоже на арендатора")
+
+    return max(0, min(score, 100)), reasons
 
 
 async def _path_llm(
-    http: httpx.AsyncClient,
     dadata: DaData,
     llm: Any,
     *,
     title: str,
     address: str,
     city: str,
-    street: str,
+    candidates: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Ask LLM which company owns/operates the building, then resolve via DaData."""
-    if llm is None or not getattr(llm, "available", False):
+    """Optional no-web resolver over already collected evidence."""
+    if llm is None or not getattr(llm, "available", False) or not llm_owner_enabled():
         return []
-    snippets: list[str] = []
-    if _is_school_title(title):
-        num = _school_number(title)
-        queries = [
-            f'"{title}" {city} МБОУ',
-            f'"{title}" {city} официальный сайт',
-            f'"{title}" {city} ИНН',
-        ]
-        if num:
-            queries.insert(0, f'"школа №{num}" {city} МБОУ')
-        if street:
-            queries.append(f'"{title}" {street}')
-        task_hint = (
-            "Это школа/соцучреждение. Найди юрлицо (МБОУ/МАОУ/школа №…), "
-            "не УК торгового центра. Не выдумывай ИНН."
+    evidence = []
+    for cand in candidates[:6]:
+        party = enrich_from_dadata(cand.get("suggest") or {})
+        evidence.append(
+            {
+                "inn": cand.get("inn"),
+                "name": party.get("name"),
+                "address": party.get("address"),
+                "okved": party.get("okved"),
+                "source": cand.get("source"),
+                "resolver_score": cand.get("resolver_score"),
+            }
         )
-        system_hint = (
-            "Ты исследователь B2B по школам и соцучреждениям в России. "
-            "Ответь строго JSON: "
-            '{"companies":[{"name":"...","role":"owner|operator|uk|unknown",'
-            '"inn":"","why":"..."}],"search_names":["..."]}. '
-            "Максимум 5 companies и 5 search_names. "
-            "Если данных мало — пустые списки, не фантазируй."
-        )
-    else:
-        queries = [
-            f'"{title}" {city} кому принадлежит',
-            f'"{title}" {city} управляющая компания',
-            f'"{title}" {city} собственник',
-        ]
-        if street:
-            queries.append(f'"{title}" {street} УК')
-        task_hint = (
-            "По открытым следам определи, какая компания скорее владеет или "
-            "управляет этим зданием (УК/оператор/собственник-юрлицо). "
-            "Не выдумывай ИНН. Верни JSON."
-        )
-        system_hint = (
-            "Ты исследователь B2B по коммерческой недвижимости в России. "
-            "Ответь строго JSON: "
-            '{"companies":[{"name":"...","role":"owner|operator|uk|unknown",'
-            '"inn":"","why":"..."}],"search_names":["..."]}. '
-            "Максимум 5 companies и 5 search_names. "
-            "Если данных мало — пустые списки, не фантазируй."
-        )
-    # Prefer RouterAI web plugin (same key). Skip Brave/Bing scrapes — they hang/429.
-    use_web = True
-    snippets = [
-        f"Здание: {title}",
-        f"Адрес: {address}",
-        f"Город: {city}",
-        f"Поисковые запросы: {'; '.join(queries[:4])}",
-    ]
-    user = {
-        "building": title,
-        "address": address,
-        "city": city,
-        "evidence": snippets[:18],
-        "task": task_hint,
+    if not evidence:
+        return []
+    prompt = {
+        "building": {"title": title, "address": address, "city": city},
+        "candidates": evidence,
+        "task": "Choose only the most plausible operator/owner/management company. Never invent an INN.",
     }
     try:
         data = await llm.chat_json(
             [
                 {
                     "role": "system",
-                    "content": system_hint,
+                    "content": (
+                        "Ты проверяешь уже найденные факты по объекту недвижимости. "
+                        "Не ищи в интернете. Ответ строго JSON: "
+                        '{"inn":"","role":"owner|operator|uk|unknown","confidence":0,"why":""}. '
+                        "Если доказательств мало, верни пустой inn."
+                    ),
                 },
-                {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
+                {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
             ],
             temperature=0.0,
-            max_tokens=700,
-            web=use_web,
-            web_max_results=8,
+            max_tokens=220,
+            web=False,
         )
-    except TypeError:
-        # Older RouterAI client without web= kwargs
-        try:
-            data = await llm.chat_json(
-                [
-                    {"role": "system", "content": system_hint},
-                    {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
-                ],
-                temperature=0.0,
-                max_tokens=700,
-            )
-        except Exception as exc:
-            log.info("llm owner path failed: %s", exc)
-            return []
     except Exception as exc:
-        log.info("llm owner path failed: %s", exc)
+        log.info("cheap llm owner judge failed: %s", exc)
         return []
-    if not isinstance(data, dict):
+    inn = re.sub(r"\D", "", str((data or {}).get("inn") or ""))
+    if len(inn) not in (10, 12):
         return []
-    names: list[str] = []
-    inns: list[str] = []
-    for row in (data.get("companies") or [])[:5]:
-        if not isinstance(row, dict):
-            continue
-        name = str(row.get("name") or "").strip()
-        inn = re.sub(r"\D", "", str(row.get("inn") or ""))
-        if name:
-            names.append(name)
-        if len(inn) in (10, 12):
-            inns.append(inn)
-    for name in (data.get("search_names") or [])[:5]:
-        text = str(name or "").strip()
-        if text:
-            names.append(text)
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for inn in _uniq_inns(inns, 5):
-        out.append({"inn": inn, "source": "llm", "query": title, "suggest": None})
-        seen.add(inn)
-    for name in names:
-        try:
-            batch = await dadata.suggest(f"{name} {city}".strip(), count=5)
-            if not batch:
-                batch = await dadata.suggest(name, count=5)
-        except Exception:
-            continue
-        for item in batch or []:
-            data_item = item.get("data") or {}
-            inn = str(data_item.get("inn") or "")
-            if not inn or inn in seen:
-                continue
-            seen.add(inn)
-            out.append(
-                {
-                    "inn": inn,
-                    "source": "llm",
-                    "query": name,
-                    "suggest": item,
-                }
-            )
-    return out
+    for cand in candidates:
+        if str(cand.get("inn") or "") == inn:
+            cand = dict(cand)
+            cand["source"] = "llm-judge"
+            cand["llm_role"] = str(data.get("role") or "unknown")
+            cand["llm_confidence"] = int(data.get("confidence") or 0)
+            cand["llm_why"] = str(data.get("why") or "")[:300]
+            return [cand]
+    try:
+        suggest = await dadata.find_by_inn(inn)
+    except Exception:
+        suggest = None
+    return [{"inn": inn, "source": "llm-judge", "query": title, "suggest": suggest}] if suggest else []
 
 
 async def resolve_building_owners(
@@ -749,98 +517,72 @@ async def resolve_building_owners(
     city: str = "",
     llm: Any | None = None,
 ) -> list[dict[str, Any]]:
-    """Return ranked hydrated DaData suggestions with source tags."""
+    """Return ranked candidates; mass mode is deterministic and LLM-free."""
     title = str(obj.get("title") or "").strip()
     address = str(obj.get("address") or "").strip()
     city = (city or str(obj.get("city") or "")).strip()
     if not title:
         return []
 
-    street = _street_hint(address)
     merged: list[dict[str, Any]] = []
     try:
-        merged.extend(
-            await _path_dadata(
-                dadata,
-                title=title,
-                address=address,
-                city=city,
-                locations=locations,
-            )
-        )
+        merged.extend(await _path_dadata(dadata, title=title, address=address, city=city, locations=locations))
     except Exception as exc:
-        log.exception("dadata owner path: %s", exc)
-
+        log.info("dadata owner path failed: %s", exc)
     try:
         merged.extend(await _path_list_org(http, title=title, city=city))
     except Exception as exc:
-        log.exception("list-org owner path: %s", exc)
+        log.info("list-org owner path failed: %s", exc)
 
-    # Free web owner search when DaData is thin.
-    # IMPORTANT: do NOT skip this just because RouterAI key exists —
-    # expensive LLM owner path is off by default (HUNT_LLM_OWNER=0).
-    from app.cost_guard import llm_owner_enabled
-
-    need_web = len(merged) < 2
-    use_llm_owner = (
-        llm_owner_enabled()
-        and llm is not None
-        and getattr(llm, "available", False)
-    )
-    if need_web and not use_llm_owner:
+    # Free web is a fallback, not an unconditional step for every building.
+    if len({str(x.get('inn') or '') for x in merged if x.get('inn')}) < 2:
         try:
             merged.extend(
                 await asyncio.wait_for(
-                    _path_web_search(http, title=title, city=city, street=street),
-                    timeout=22.0,
+                    _path_web(http, title=title, address=address, city=city), timeout=22.0
                 )
             )
         except Exception as exc:
-            log.info("web owner path skipped/failed: %s", exc)
+            log.info("free web owner fallback failed: %s", exc)
 
-    if use_llm_owner and len(merged) < 4:
-        try:
-            merged.extend(
-                await asyncio.wait_for(
-                    _path_llm(
-                        http,
-                        dadata,
-                        llm,
-                        title=title,
-                        address=address,
-                        city=city,
-                        street=street,
-                    ),
-                    timeout=45.0,
-                )
-            )
-        except Exception as exc:
-            log.info("llm owner path skipped/failed: %s", exc)
+    hydrated = await _hydrate(dadata, merged)
+    ranked: list[dict[str, Any]] = []
+    for cand in hydrated:
+        score, reasons = _candidate_score(cand, title=title, address=address, city=city)
+        ranked.append({**cand, "resolver_score": score, "resolver_reasons": reasons})
+    ranked.sort(key=lambda x: (int(x.get("resolver_score") or 0), 1 if x.get("source") == "dadata" else 0), reverse=True)
 
-    hydrated = await _hydrate_inns(dadata, merged)
-    hydrated.sort(
-        key=lambda c: (
-            _uk_rank(c.get("suggest") or {}, title),
-            1 if c.get("source") in {"llm", "dadata"} else 0,
-        ),
-        reverse=True,
-    )
-    return hydrated
+    # Optional deep mode: judge already-collected candidates, no RouterAI web plugin.
+    if llm_owner_enabled() and ranked and int(ranked[0].get("resolver_score") or 0) < 82:
+        judged = await _path_llm(dadata, llm, title=title, address=address, city=city, candidates=ranked)
+        if judged:
+            chosen_inn = str(judged[0].get("inn") or "")
+            ranked.sort(key=lambda x: (1 if str(x.get("inn") or "") == chosen_inn else 0, int(x.get("resolver_score") or 0)), reverse=True)
+            ranked[0].update({k: v for k, v in judged[0].items() if k.startswith("llm_") or k == "source"})
+
+    return ranked[:12]
 
 
 def candidate_party(cand: dict[str, Any]) -> dict[str, Any] | None:
     suggest = cand.get("suggest")
     if not suggest:
         return None
-    return enrich_from_dadata(suggest)
+    party = enrich_from_dadata(suggest)
+    party["resolver_score"] = int(cand.get("resolver_score") or 0)
+    party["resolver_reasons"] = list(cand.get("resolver_reasons") or [])
+    party["owner_source"] = str(cand.get("source") or "")
+    if cand.get("llm_role"):
+        party["resolver_role"] = cand.get("llm_role")
+    return party
 
 
 def candidate_sources_summary(cands: list[dict[str, Any]]) -> str:
+    if not cands:
+        return "кандидатов нет"
     sources = sorted({str(c.get("source") or "") for c in cands if c.get("source")})
-    inns = [str(c.get("inn") or "") for c in cands[:5] if c.get("inn")]
-    parts = []
-    if sources:
-        parts.append("пути: " + ", ".join(sources))
-    if inns:
-        parts.append("инн-кандидаты: " + ", ".join(inns))
-    return "; ".join(parts)
+    top = cands[:3]
+    bits = [
+        f"{c.get('inn') or '?'}:{int(c.get('resolver_score') or 0)}"
+        for c in top
+    ]
+    return f"пути: {', '.join(sources) or 'нет'}; топ: {', '.join(bits)}"
