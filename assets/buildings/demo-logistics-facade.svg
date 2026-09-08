@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">Demo logistics facade</title>
+  <desc id="desc">Demonstration placeholder image of a logistics warehouse facade with exterior lighting zones.</desc>
+  <rect width="1200" height="720" fill="#E5E7EB"/>
+  <rect y="470" width="1200" height="250" fill="#D1D5DB"/>
+  <rect x="110" y="230" width="980" height="280" fill="#F8FAFC" stroke="#9CA3AF" stroke-width="6"/>
+  <rect x="150" y="278" width="170" height="94" fill="#CBD5E1"/>
+  <rect x="355" y="278" width="170" height="94" fill="#CBD5E1"/>
+  <rect x="560" y="278" width="170" height="94" fill="#CBD5E1"/>
+  <rect x="765" y="278" width="170" height="94" fill="#CBD5E1"/>
+  <rect x="170" y="410" width="128" height="100" fill="#94A3B8"/>
+  <rect x="378" y="410" width="128" height="100" fill="#94A3B8"/>
+  <rect x="586" y="410" width="128" height="100" fill="#94A3B8"/>
+  <rect x="794" y="410" width="128" height="100" fill="#94A3B8"/>
+  <path d="M130 225h940l-44-72H174l-44 72Z" fill="#334155"/>
+  <circle cx="210" cy="220" r="9" fill="#FBBF24"/>
+  <circle cx="450" cy="220" r="9" fill="#FBBF24"/>
+  <circle cx="690" cy="220" r="9" fill="#FBBF24"/>
+  <circle cx="930" cy="220" r="9" fill="#FBBF24"/>
+  <path d="M210 230 120 500h180L210 230Z" fill="#FACC15" opacity="0.18"/>
+  <path d="M450 230 360 500h180L450 230Z" fill="#FACC15" opacity="0.18"/>
+  <path d="M690 230 600 500h180L690 230Z" fill="#FACC15" opacity="0.18"/>
+  <path d="M930 230 840 500h180L930 230Z" fill="#FACC15" opacity="0.18"/>
+  <text x="70" y="655" fill="#475569" font-family="Arial, Helvetica, sans-serif" font-size="28">DEMO: logistics facade placeholder</text>
+</svg>

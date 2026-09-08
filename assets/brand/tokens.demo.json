@@ -1,0 +1,16 @@
+{
+  "note": "Демонстрационные брендовые токены. Заменить на официальный брендбук NITEOS.",
+  "colors": {
+    "primary": "#111827",
+    "accent": "#00A3FF",
+    "success": "#16A34A",
+    "warning": "#F59E0B",
+    "danger": "#DC2626",
+    "surface": "#F8FAFC",
+    "text": "#111827"
+  },
+  "typography": {
+    "heading": "Arial",
+    "body": "Arial"
+  }
+}

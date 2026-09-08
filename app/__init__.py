@@ -1,0 +1,1 @@
+"""Niteos hunt bot."""

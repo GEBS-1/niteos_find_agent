@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="220" viewBox="0 0 720 220" role="img" aria-labelledby="title desc">
+  <title id="title">NITEOS demo logo</title>
+  <desc id="desc">Demonstration placeholder logo for NITEOS Hunt.</desc>
+  <rect width="720" height="220" rx="20" fill="#111827"/>
+  <g transform="translate(52 44)">
+    <path d="M64 0 128 34v64l-64 34L0 98V34L64 0Z" fill="#00A3FF"/>
+    <path d="M64 22 106 44v44l-42 22-42-22V44l42-22Z" fill="#111827"/>
+    <path d="M64 38 91 53v27L64 95 37 80V53l27-15Z" fill="#FFFFFF"/>
+  </g>
+  <text x="214" y="108" fill="#FFFFFF" font-family="Arial, Helvetica, sans-serif" font-size="62" font-weight="700" letter-spacing="2">NITEOS</text>
+  <text x="218" y="150" fill="#9CA3AF" font-family="Arial, Helvetica, sans-serif" font-size="24">HUNT DEMO ASSET</text>
+</svg>

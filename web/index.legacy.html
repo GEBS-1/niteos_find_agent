@@ -1,0 +1,1314 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>NITEOS Lead Radar — Охота</title>
+  <link rel="icon" href="/favicon.ico" type="image/png" />
+  <link rel="shortcut icon" href="/favicon.ico" type="image/png" />
+  <link rel="apple-touch-icon" href="/static/favicon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet" />
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: #07110f;
+      --card: #0d1916;
+      --panel2: #10211d;
+      --text: #eef7f2;
+      --muted: #91a79e;
+      --accent: #6cf5b5;
+      --accent2: #41c990;
+      --accent-text: #062016;
+      --line: #20332d;
+      --warn: #ffd56a;
+      --danger: #ff7a7a;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      background: radial-gradient(circle at 75% 15%, #11382c 0, #07110f 35%, #050b09 80%);
+      color: var(--text);
+      font: 16px/1.45 Manrope, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      min-height: 100%;
+    }
+    body { padding: 16px 16px 36px; }
+    .brand-row { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+    .logo-mark {
+      width: 34px; height: 34px; border-radius: 11px; flex-shrink: 0;
+      background: linear-gradient(140deg, var(--accent), #1e684e);
+      box-shadow: 0 0 28px rgba(108,245,181,.22);
+      display: grid; place-items: center; color: #072014; font-weight: 800; font-size: 14px;
+    }
+    .eyebrow { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+    h1 { font-size: 24px; font-weight: 750; margin: 0 0 4px; letter-spacing: -.02em; }
+    .sub { color: var(--muted); font-size: 13px; margin-bottom: 18px; line-height: 1.45; }
+    .muted { color: var(--muted); font-size: 13px; }
+    #gate {
+      display: none; position: fixed; inset: 0; z-index: 50;
+      background: rgba(5,11,9,.92); padding: 24px; align-items: center; justify-content: center;
+    }
+    #gate.on { display: flex; }
+    #gate .box {
+      width: min(420px, 100%); background: var(--card); border: 1px solid var(--line);
+      border-radius: 16px; padding: 20px; box-shadow: 0 18px 60px rgba(0,0,0,.34);
+    }
+    #app-main.hidden { display: none; }
+    .guest-banner {
+      display: none; margin: 0 0 14px; padding: 10px 12px; border-radius: 10px;
+      border: 1px solid rgba(108,245,181,.28); background: rgba(108,245,181,.08); font-size: 13px;
+    }
+    .guest-banner.on { display: block; }
+    .share-panel {
+      display: none; margin: 12px 0 0; padding: 12px; border-radius: 12px;
+      border: 1px dashed var(--line); background: var(--panel2); font-size: 13px;
+    }
+    .share-panel.on { display: block; }
+    .share-panel input { margin-top: 8px; font-size: 12px; }
+    label { display: block; font-size: 12px; color: var(--muted); margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .04em; }
+    input, textarea {
+      width: 100%; background: #081510; color: var(--text); border: 1px solid var(--line);
+      border-radius: 10px; padding: 12px 12px; font: inherit; outline: none;
+    }
+    input:focus, textarea:focus { border-color: #47816c; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .chip, .count, .sub-chip {
+      border: 1px solid var(--line); background: #0b1915; color: var(--muted);
+      border-radius: 999px; padding: 8px 12px; font: inherit; cursor: pointer;
+    }
+    .chip.on, .count.on, .sub-chip.on { background: var(--accent); color: var(--accent-text); border-color: transparent; font-weight: 700; }
+    .chip.open { border-color: var(--accent2); color: var(--text); }
+    .sphere-block { margin-top: 10px; }
+    .sphere-panel {
+      display: none; margin-top: 8px; padding: 10px 12px;
+      background: var(--panel2); border: 1px solid var(--line); border-radius: 12px;
+    }
+    .sphere-panel.open { display: block; }
+    .sphere-panel .hint { font-size: 12px; color: var(--muted); margin: 0 0 8px; }
+    .sphere-okved { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.45; }
+    .summary {
+      margin-top: 12px; padding: 12px; border-radius: 12px;
+      background: #081510; border: 1px solid var(--line); font-size: 13px;
+    }
+    .summary b { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 4px; }
+    .summary .empty { color: var(--muted); }
+    .picked { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .tag { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px 6px 10px; font-size: 13px; display: flex; gap: 8px; align-items: center; }
+    .tag button { border: 0; background: transparent; color: var(--muted); font-size: 16px; cursor: pointer; }
+    .adv-toggle {
+      width: 100%; text-align: left; border: 1px solid var(--line); background: var(--panel2);
+      color: var(--text); border-radius: 12px; padding: 10px 12px; font: inherit; cursor: pointer;
+    }
+    .adv-body { display: none; margin-top: 8px; }
+    .adv-body.open { display: block; }
+    .list {
+      max-height: 180px; overflow: auto; border: 1px solid var(--line); border-radius: 10px;
+      background: #081510; margin-top: 8px;
+    }
+    .item { padding: 10px 12px; border-bottom: 1px solid var(--line); cursor: pointer; font-size: 14px; }
+    .item:last-child { border-bottom: 0; }
+    .item b { font-variant-numeric: tabular-nums; margin-right: 8px; }
+    .item small { color: var(--muted); }
+    .go {
+      width: 100%; margin-top: 18px; border: 0; border-radius: 12px; padding: 14px;
+      background: var(--accent); color: var(--accent-text); font: 700 16px/1 inherit; cursor: pointer;
+    }
+    .go:disabled { opacity: .5; }
+    .go.secondary {
+      background: transparent; color: var(--text); border: 1px solid var(--line); font-weight: 600;
+    }
+    .status { margin-top: 16px; color: var(--muted); font-size: 14px; white-space: pre-wrap; }
+    .hunt-overlay {
+      display: none; position: fixed; inset: 0; z-index: 80;
+      background: rgba(4, 12, 10, .72); backdrop-filter: blur(4px);
+      align-items: center; justify-content: center; padding: 20px;
+    }
+    .hunt-overlay.on { display: flex; }
+    .hunt-modal {
+      width: min(420px, 100%);
+      background: linear-gradient(165deg, #14362b, #0b1a15);
+      border: 1px solid #2f5a48; border-radius: 18px; padding: 22px 20px 18px;
+      box-shadow: 0 18px 50px rgba(0,0,0,.45); color: var(--text);
+      animation: huntIn .28s ease-out;
+    }
+    @keyframes huntIn {
+      from { opacity: 0; transform: translateY(10px) scale(.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    .hunt-modal h3 { margin: 0 0 8px; font-size: 18px; font-weight: 750; }
+    .hunt-modal .eta {
+      margin: 0 0 12px; color: var(--accent); font-size: 14px; font-weight: 650;
+    }
+    .hunt-modal .step {
+      margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; min-height: 2.6em;
+    }
+    .hunt-bar {
+      margin-top: 14px; height: 6px; border-radius: 999px; background: #0a1a14;
+      overflow: hidden; border: 1px solid #29463b;
+    }
+    .hunt-bar > i {
+      display: block; height: 100%; width: 28%; border-radius: inherit;
+      background: linear-gradient(90deg, #2f9e6f, var(--accent));
+      animation: huntBar 1.4s ease-in-out infinite;
+    }
+    @keyframes huntBar {
+      0% { transform: translateX(-120%); }
+      100% { transform: translateX(380%); }
+    }
+    .hunt-hint { margin-top: 10px; font-size: 12px; color: var(--muted); }
+
+    /* ——— Result cards ——— */
+    .card {
+      background: linear-gradient(165deg, #122820 0%, #0b1714 55%, #091310 100%);
+      border: 1px solid #27483c;
+      border-radius: 20px;
+      padding: 0;
+      margin-top: 16px;
+      overflow: hidden;
+      box-shadow: 0 14px 40px rgba(0,0,0,.22);
+    }
+    .card > .card-body, .card.pad { padding: 16px; }
+    .card.err { padding: 16px; color: #ff9b9b; }
+    .card-top {
+      display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;
+      padding: 16px 16px 0;
+    }
+    .stamp {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; font-weight: 750; letter-spacing: .01em;
+      padding: 7px 12px; border-radius: 999px;
+      border: 1px solid rgba(108,245,181,.35);
+      background: rgba(108,245,181,.12); color: var(--accent);
+      white-space: nowrap;
+    }
+    .stamp.warn {
+      border-color: rgba(255,213,106,.4);
+      background: rgba(255,213,106,.1); color: var(--warn);
+    }
+    .stamp.bad {
+      border-color: rgba(255,122,122,.4);
+      background: rgba(255,122,122,.1); color: var(--danger);
+    }
+    .card-num {
+      font-size: 12px; color: var(--muted); font-weight: 650;
+      padding-top: 6px;
+    }
+    .card-body { padding: 10px 16px 16px; }
+    .obj-title {
+      margin: 0; font-size: 22px; font-weight: 800; letter-spacing: -.03em;
+      line-height: 1.2;
+    }
+    .obj-addr {
+      margin-top: 6px; color: var(--muted); font-size: 13px; line-height: 1.4;
+    }
+    .obj-addr a { color: var(--accent); text-decoration: none; font-weight: 650; }
+    .photos {
+      display: flex; gap: 8px; overflow-x: auto; margin-top: 14px;
+      padding-bottom: 2px; scrollbar-width: thin;
+    }
+    .photos a { flex: 0 0 auto; }
+    .photos img {
+      height: 128px; width: auto; max-width: 200px; border-radius: 12px; object-fit: cover;
+      border: 1px solid var(--line); background: #000; display: block;
+    }
+    .photo-empty {
+      margin-top: 12px; padding: 10px 12px; border-radius: 12px;
+      background: rgba(255,255,255,.03); border: 1px dashed var(--line);
+      color: var(--muted); font-size: 12px;
+    }
+    .hl-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px;
+    }
+    .hl {
+      padding: 12px 14px; border-radius: 14px;
+      background: rgba(8,21,16,.85); border: 1px solid var(--line);
+    }
+    .hl.wide { grid-column: 1 / -1; }
+    .hl.accent {
+      background: linear-gradient(135deg, rgba(108,245,181,.14), rgba(18,50,38,.5));
+      border-color: rgba(108,245,181,.35);
+    }
+    .hl .lab {
+      display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+      color: var(--muted); margin-bottom: 4px; font-weight: 650;
+    }
+    .hl .val {
+      font-size: 16px; font-weight: 750; line-height: 1.3; word-break: break-word;
+    }
+    .hl .val.lg { font-size: 18px; }
+    .hl .sub { margin-top: 4px; font-size: 12px; color: var(--muted); font-weight: 500; }
+    .contact-panel {
+      margin-top: 14px; padding: 14px; border-radius: 16px;
+      background: linear-gradient(160deg, #153a2d, #0e221b);
+      border: 1px solid #2f5f4a;
+    }
+    .contact-panel h4 {
+      margin: 0 0 10px; font-size: 12px; text-transform: uppercase;
+      letter-spacing: .06em; color: var(--accent); font-weight: 750;
+    }
+    .contact-main {
+      font-size: 17px; font-weight: 750; line-height: 1.35;
+    }
+    .contact-main a { color: var(--accent); text-decoration: none; }
+    .contact-note { margin-top: 6px; font-size: 13px; color: #b7d0c5; }
+    .chip-row {
+      display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px;
+    }
+    .cchip {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 9px 12px; border-radius: 999px; text-decoration: none;
+      font-size: 13px; font-weight: 700; color: var(--text);
+      background: rgba(0,0,0,.28); border: 1px solid #33584a;
+    }
+    .cchip:hover { border-color: var(--accent); color: var(--accent); }
+    .cchip.ghost {
+      color: var(--muted); font-weight: 600; border-style: dashed; cursor: default;
+    }
+    .finance-line {
+      margin-top: 14px; padding: 12px 14px; border-radius: 14px;
+      background: rgba(255,255,255,.03); border: 1px solid var(--line);
+      display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13px;
+    }
+    .finance-line strong { color: var(--text); font-weight: 750; }
+    .finance-line span { color: var(--muted); }
+    .more {
+      margin-top: 12px; border-radius: 12px; border: 1px solid var(--line);
+      background: rgba(0,0,0,.18);
+    }
+    .more > summary {
+      cursor: pointer; list-style: none; padding: 11px 14px;
+      font-size: 13px; font-weight: 700; color: var(--muted);
+      user-select: none;
+    }
+    .more > summary::-webkit-details-marker { display: none; }
+    .more > summary::after { content: " ▾"; color: var(--accent); }
+    .more[open] > summary::after { content: " ▴"; }
+    .more-body { padding: 0 14px 12px; display: grid; gap: 8px; }
+    .more-row {
+      display: grid; grid-template-columns: 100px 1fr; gap: 8px; font-size: 13px;
+    }
+    .more-row .k { color: var(--muted); }
+    .more-row .v { color: var(--text); word-break: break-word; }
+    .more-row .v a { color: var(--accent); }
+    .stamp-hint { margin-top: 10px; font-size: 12px; color: var(--muted); line-height: 1.4; }
+    .kp-actions { margin-top: 14px; }
+    .kp-actions .go { margin-top: 0; }
+    .kp-ready {
+      padding: 12px 14px; border-radius: 14px;
+      background: rgba(108,245,181,.08); border: 1px solid rgba(108,245,181,.22);
+      font-size: 14px; line-height: 1.45;
+    }
+    .kp-ready b { display: block; margin-bottom: 4px; font-size: 15px; }
+    .err { color: #ff9b9b; }
+    .meta { color: var(--muted); font-size: 13px; }
+    .results-head { display: flex; justify-content: space-between; align-items: end; margin: 18px 0 6px; gap: 10px; }
+    .results-head h2 { margin: 0; font-size: 18px; }
+    .qualification {
+      margin-top: 0; padding: 10px 12px; border: 1px solid var(--line);
+      border-radius: 12px; background: #081510; font-size: 13px;
+    }
+    .qualification strong { display: block; margin-bottom: 4px; }
+    .qualification.bad { border-color: rgba(255,122,122,.35); background: rgba(180,40,40,.08); }
+    .qualification.ok { border-color: rgba(108,245,181,.35); background: rgba(40,150,95,.08); }
+
+    .geo-box { margin-top: 4px; }
+    .geo-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; min-height: 0; }
+    .geo-tags:empty { display: none; }
+    .geo-list {
+      max-height: 200px; overflow: auto; border: 1px solid var(--line); border-radius: 10px;
+      background: #081510; margin-top: 8px;
+    }
+    .geo-item { padding: 10px 12px; border-bottom: 1px solid var(--line); cursor: pointer; font-size: 14px; }
+    .geo-item:last-child { border-bottom: 0; }
+    .geo-item:hover, .geo-item.on { background: rgba(108,245,181,.1); }
+    .geo-item small { color: var(--muted); display: block; margin-top: 2px; }
+    .geo-hint { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+    @media (max-width: 520px) {
+      .hl-grid { grid-template-columns: 1fr; }
+      .more-row { grid-template-columns: 1fr; gap: 2px; }
+      .obj-title { font-size: 20px; }
+      .photos img { height: 110px; }
+    }
+  </style>
+</head>
+<body>
+  <div id="gate">
+    <div class="box">
+      <h1 style="margin-bottom:8px">NITEOS Radar</h1>
+      <div class="sub" style="margin-bottom:12px">Пароль команды или одноразовая клиентская ссылка.</div>
+      <label style="margin-top:0">Пароль</label>
+      <input id="login-pass" type="password" placeholder="Пароль" />
+      <button class="go" id="login-btn" type="button" style="margin-top:12px">Войти</button>
+      <div class="status" id="login-status" style="margin-top:10px"></div>
+    </div>
+  </div>
+
+  <div id="app-main" class="hidden">
+  <div class="brand-row">
+    <div class="logo-mark">N</div>
+    <div>
+      <div class="eyebrow">NITEOS · Lead Radar</div>
+      <h1>Охота по зданиям</h1>
+    </div>
+  </div>
+  <div class="guest-banner" id="guest-banner">Гостевой доступ по одноразовой ссылке. Ссылка привязана к этому устройству и не для пересылки.</div>
+  <div class="sub">Город → тип здания → фото → в интернете «кому принадлежит» → компания → ИНН / директор. Без здания карточки нет. КП — отдельным шагом.</div>
+  <div class="share-panel" id="share-panel">
+    <div><b>Одноразовая ссылка для клиента</b></div>
+    <div class="meta" style="margin-top:4px">Клиент открывает ссылку один раз — без пароля. После входа ссылка сгорает.</div>
+    <button class="chip" id="share-create" type="button" style="margin-top:8px">Создать ссылку</button>
+    <input id="share-url" readonly placeholder="Ссылка появится здесь" />
+    <div class="meta" id="share-hint" style="margin-top:6px"></div>
+  </div>
+
+  <label>Где искать</label>
+  <div class="geo-box">
+    <div class="row" id="geo-presets">
+      <button class="chip on" type="button" id="geo-all">Вся Россия</button>
+    </div>
+    <div class="row" id="geo-fo" style="margin-top:8px"></div>
+    <input id="geo-q" placeholder="Поиск: Казань, Самара… или вставь через запятую" style="margin-top:8px" />
+    <div class="geo-tags" id="geo-tags"></div>
+    <div class="geo-list" id="geo-list"></div>
+    <p class="geo-hint">Можно выбрать города и целые регионы/республики. Enter или запятая — добавить из поля.</p>
+  </div>
+
+  <label>Что ищем</label>
+  <div id="spheres"></div>
+  <div class="summary" id="summary"></div>
+
+  <label>Уточнение здания <span style="text-transform:none;letter-spacing:0">(необязательно)</span></label>
+  <input id="phrase" placeholder="Имя ТЦ / объекта, например: Мега, Кольцо, Южный" />
+
+  <button class="adv-toggle" id="okved-toggle" type="button">+ Дополнительный фильтр ОКВЭД</button>
+  <div class="adv-body" id="okved-adv">
+    <div class="sub" style="margin:0 0 8px">ОКВЭД сужает юрлица при поиске собственника. Сфера уже задаёт тип здания.</div>
+    <input id="okved-q" placeholder="Поиск по списку: 52.10, склад, завод…" />
+    <div class="row" style="margin-top:8px">
+      <input id="okved-custom" placeholder="Свой код, например 25.11" style="flex:1" />
+      <button class="chip" id="okved-add" type="button">Добавить</button>
+    </div>
+    <div class="picked" id="okved-picked"></div>
+    <div class="list" id="okved-list"></div>
+  </div>
+
+  <label>Сколько зданий</label>
+  <div class="row" id="counts"></div>
+
+  <button class="go" id="go" type="button">Начать охоту</button>
+  <div class="status" id="status"></div>
+  <div id="results"></div>
+
+  <div class="hunt-overlay" id="hunt-overlay" aria-live="polite">
+    <div class="hunt-modal">
+      <h3>Идёт сбор информации</h3>
+      <p class="eta" id="hunt-overlay-eta">Ориентировочно ~3–5 мин</p>
+      <p class="step" id="hunt-overlay-step">Запускаю агентов…</p>
+      <div class="hunt-bar"><i></i></div>
+      <div class="hunt-hint">Здание → собственник → контакты / фото. Можно оставить вкладку открытой.</div>
+    </div>
+  </div>
+
+  <div class="results-head" style="margin-top:28px">
+    <h2>История КП</h2>
+    <button class="chip" id="kp-refresh" type="button">Обновить</button>
+  </div>
+  <div class="sub" style="margin-top:0">Карточки, которые уже взяли в работу — в охоту больше не попадут.</div>
+  <div id="kp-history"></div>
+  </div><!-- #app-main -->
+
+  <script>
+    const tg = window.Telegram && window.Telegram.WebApp;
+    if (tg) { tg.ready(); tg.expand(); }
+
+    const params = new URLSearchParams(location.search);
+    const token = params.get("t") || "";
+    const shareToken = params.get("s") || "";
+    const BASE = location.pathname.replace(/\/index\.html$/, "").replace(/\/+$/, "");
+    function api(path) { return BASE + path; }
+
+    const SESSION_KEY = "niteos_session";
+    let sessionToken = "";
+    try { sessionToken = localStorage.getItem(SESSION_KEY) || ""; } catch (_) {}
+
+    function saveSession(value) {
+      sessionToken = String(value || "");
+      try {
+        if (sessionToken) localStorage.setItem(SESSION_KEY, sessionToken);
+        else localStorage.removeItem(SESSION_KEY);
+      } catch (_) {}
+    }
+
+    const state = {
+      meta: null,
+      count: 10,
+      openPanels: new Set(),
+      selected: new Map(),
+      manualOkved: [],
+      huntId: null,
+      timer: null,
+      huntStartedAt: 0,
+      geoAll: true,
+      geoCities: [],
+      geoRegions: [],
+      geoFo: "",
+      role: null,
+    };
+
+    function esc(s) {
+      return String(s ?? "").replace(/[&<>"'`]/g, c => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "`": "&#96;"
+      }[c]));
+    }
+
+    function headers() {
+      const h = { "Content-Type": "application/json" };
+      if (tg && tg.initData) h["X-Telegram-Init-Data"] = tg.initData;
+      if (token) h["X-Niteos-Token"] = token;
+      if (sessionToken) h["X-Niteos-Session"] = sessionToken;
+      return h;
+    }
+
+    async function ensureAuth() {
+      if (shareToken) {
+        const enter = await fetch(api("/api/share/enter"), {
+          method: "POST",
+          headers: headers(),
+          credentials: "same-origin",
+          body: JSON.stringify({ token: shareToken }),
+        });
+        const text = await enter.text();
+        if (!enter.ok) {
+          document.getElementById("gate").classList.add("on");
+          document.getElementById("login-status").innerHTML = `<span class="err">${esc(text)}</span>`;
+          throw new Error(text);
+        }
+        try {
+          const data = JSON.parse(text);
+          if (data.session) saveSession(data.session);
+        } catch (_) {}
+        const u = new URL(location.href);
+        u.searchParams.delete("s");
+        history.replaceState({}, "", u.pathname + u.search);
+      }
+      const auth = await fetch(api("/api/auth"), { credentials: "same-origin", headers: headers() });
+      const info = await auth.json();
+      if (info.ok) {
+        state.role = info.role;
+        document.getElementById("gate").classList.remove("on");
+        document.getElementById("app-main").classList.remove("hidden");
+        document.getElementById("guest-banner").classList.toggle("on", info.role === "guest");
+        document.getElementById("share-panel").classList.toggle("on", info.role === "staff" || info.role === "telegram");
+        return;
+      }
+      if (info.password_required) {
+        saveSession("");
+        document.getElementById("gate").classList.add("on");
+        document.getElementById("app-main").classList.add("hidden");
+        throw new Error("login");
+      }
+      document.getElementById("app-main").classList.remove("hidden");
+    }
+
+    document.getElementById("login-btn").onclick = async () => {
+      const password = document.getElementById("login-pass").value;
+      document.getElementById("login-status").textContent = "Проверяю…";
+      const res = await fetch(api("/api/login"), {
+        method: "POST",
+        headers: headers(),
+        credentials: "same-origin",
+        body: JSON.stringify({ password }),
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        document.getElementById("login-status").innerHTML = `<span class="err">${esc(text)}</span>`;
+        return;
+      }
+      try {
+        const data = JSON.parse(text);
+        if (data.session) saveSession(data.session);
+      } catch (_) {}
+      document.getElementById("gate").classList.remove("on");
+      document.getElementById("app-main").classList.remove("hidden");
+      state.role = "staff";
+      document.getElementById("share-panel").classList.add("on");
+      load().catch(err => {
+        if (String(err.message) !== "login") {
+          document.getElementById("status").innerHTML = `<span class="err">${esc(err.message || err)}</span>`;
+        }
+      });
+    };
+
+    document.getElementById("share-create").onclick = async () => {
+      const res = await fetch(api("/api/share/create"), {
+        method: "POST",
+        headers: headers(),
+        credentials: "same-origin",
+        body: JSON.stringify({ label: "клиент", max_uses: 1, hours: 72 }),
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        document.getElementById("share-hint").innerHTML = `<span class="err">${esc(text)}</span>`;
+        return;
+      }
+      const data = JSON.parse(text);
+      document.getElementById("share-url").value = data.url;
+      document.getElementById("share-hint").textContent =
+        data.hint || "Одноразовая. Отдай клиенту — после первого входа ссылка больше не работает.";
+      try {
+        document.getElementById("share-url").select();
+        await navigator.clipboard.writeText(data.url);
+        document.getElementById("share-hint").textContent += " Скопировано.";
+      } catch (_) {}
+    };
+
+    function optionKey(sphereId, optionId) { return `${sphereId}:${optionId}`; }
+
+    function geoLabel() {
+      if (state.geoAll || (!state.geoCities.length && !state.geoRegions.length)) return "Вся Россия";
+      const parts = [...state.geoCities, ...state.geoRegions.map(r => "рег. " + r)];
+      if (parts.length <= 4) return parts.join(", ");
+      return parts.slice(0, 4).join(", ") + ` (+${parts.length - 4})`;
+    }
+
+    function setGeoAll(on) {
+      state.geoAll = on;
+      if (on) {
+        state.geoCities = [];
+        state.geoRegions = [];
+        state.geoFo = "";
+      }
+      document.getElementById("geo-all").classList.toggle("on", state.geoAll);
+      renderGeoTags();
+      renderGeoList(document.getElementById("geo-q").value);
+      renderFo();
+      renderSummary();
+    }
+
+    function addGeoCity(name) {
+      name = (name || "").trim();
+      if (!name || name.toLowerCase() === "вся россия") return;
+      if (state.geoCities.some(c => c.toLowerCase() === name.toLowerCase())) return;
+      state.geoAll = false;
+      state.geoCities.push(name);
+      document.getElementById("geo-all").classList.remove("on");
+      renderGeoTags();
+      renderSummary();
+    }
+
+    function addGeoRegion(title, dadata) {
+      const name = (dadata || title || "").trim();
+      if (!name) return;
+      if (state.geoRegions.some(r => r.toLowerCase() === name.toLowerCase())) return;
+      state.geoAll = false;
+      state.geoRegions.push(name);
+      document.getElementById("geo-all").classList.remove("on");
+      renderGeoTags();
+      renderSummary();
+    }
+
+    function removeGeoCity(i) {
+      state.geoCities.splice(i, 1);
+      if (!state.geoCities.length && !state.geoRegions.length) setGeoAll(true);
+      else { renderGeoTags(); renderSummary(); }
+    }
+
+    function removeGeoRegion(i) {
+      state.geoRegions.splice(i, 1);
+      if (!state.geoCities.length && !state.geoRegions.length) setGeoAll(true);
+      else { renderGeoTags(); renderSummary(); }
+    }
+
+    function commitGeoInput(raw) {
+      const parts = String(raw || "").replace(/;/g, ",").split(",");
+      for (const part of parts) {
+        const t = part.trim();
+        if (!t) continue;
+        const flat = (state.meta.geo && state.meta.geo.flat) || [];
+        const hit = flat.find(x =>
+          x.title.toLowerCase() === t.toLowerCase() ||
+          (x.label && x.label.toLowerCase() === t.toLowerCase()) ||
+          (x.dadata_region && x.dadata_region.toLowerCase() === t.toLowerCase())
+        );
+        if (hit && hit.kind === "region") addGeoRegion(hit.title, hit.dadata_region);
+        else if (hit && hit.kind === "city") addGeoCity(hit.title);
+        else addGeoCity(t);
+      }
+      document.getElementById("geo-q").value = "";
+      renderGeoList("");
+    }
+
+    function renderGeoTags() {
+      const box = document.getElementById("geo-tags");
+      const tags = [];
+      state.geoCities.forEach((c, i) => {
+        tags.push(`<span class="tag">${esc(c)}<button type="button" data-city="${i}" aria-label="убрать">×</button></span>`);
+      });
+      state.geoRegions.forEach((r, i) => {
+        tags.push(`<span class="tag">рег. ${esc(r)}<button type="button" data-reg="${i}" aria-label="убрать">×</button></span>`);
+      });
+      box.innerHTML = tags.join("");
+      box.querySelectorAll("[data-city]").forEach(btn => {
+        btn.onclick = () => removeGeoCity(Number(btn.dataset.city));
+      });
+      box.querySelectorAll("[data-reg]").forEach(btn => {
+        btn.onclick = () => removeGeoRegion(Number(btn.dataset.reg));
+      });
+    }
+
+    function renderFo() {
+      const root = document.getElementById("geo-fo");
+      const districts = (state.meta.geo && state.meta.geo.districts) || [];
+      root.innerHTML = districts.map(fo =>
+        `<button class="chip${state.geoFo === fo.id ? " on" : ""}" type="button" data-fo="${fo.id}">${esc(fo.title)}</button>`
+      ).join("");
+      root.querySelectorAll("[data-fo]").forEach(btn => {
+        btn.onclick = () => {
+          state.geoFo = state.geoFo === btn.dataset.fo ? "" : btn.dataset.fo;
+          renderFo();
+          renderGeoList(document.getElementById("geo-q").value);
+        };
+      });
+    }
+
+    function renderGeoList(q) {
+      q = (q || "").toLowerCase().trim();
+      const box = document.getElementById("geo-list");
+      if (!q && !state.geoFo) {
+        box.innerHTML = "";
+        return;
+      }
+      const geo = state.meta.geo || { flat: [], districts: [] };
+      let items = [];
+      if (state.geoFo) {
+        const fo = (geo.districts || []).find(d => d.id === state.geoFo);
+        if (fo) {
+          for (const reg of fo.regions || []) {
+            items.push({
+              kind: "region",
+              title: reg.title,
+              dadata_region: reg.dadata_region,
+              label: reg.title,
+              sub: "весь регион",
+            });
+            for (const city of reg.cities || []) {
+              items.push({
+                kind: "city",
+                title: city,
+                label: city,
+                sub: reg.title,
+              });
+            }
+          }
+        }
+      } else {
+        items = (geo.flat || []).map(x => ({
+          ...x,
+          sub: x.kind === "region" ? "весь регион" : (x.region || ""),
+        }));
+      }
+      if (q) {
+        items = items.filter(x =>
+          (x.title || "").toLowerCase().includes(q) ||
+          (x.label || "").toLowerCase().includes(q) ||
+          (x.sub || "").toLowerCase().includes(q) ||
+          (x.dadata_region || "").toLowerCase().includes(q)
+        );
+      }
+      items = items.slice(0, 80);
+      box.innerHTML = items.map(x => {
+        const on = x.kind === "city"
+          ? state.geoCities.some(c => c.toLowerCase() === x.title.toLowerCase())
+          : state.geoRegions.some(r => r.toLowerCase() === (x.dadata_region || x.title).toLowerCase());
+        return `<div class="geo-item${on ? " on" : ""}" data-kind="${x.kind}" data-title="${esc(x.title)}" data-dadata="${esc(x.dadata_region || "")}">
+          ${esc(x.label || x.title)}${x.kind === "region" ? " · регион" : ""}
+          ${x.sub ? `<small>${esc(x.sub)}</small>` : ""}
+        </div>`;
+      }).join("") || `<div class="geo-item">Ничего не нашлось — Enter добавит как свой город.</div>`;
+      box.querySelectorAll(".geo-item[data-kind]").forEach(el => {
+        el.onclick = () => {
+          if (el.dataset.kind === "region") addGeoRegion(el.dataset.title, el.dataset.dadata);
+          else addGeoCity(el.dataset.title);
+          renderGeoList(document.getElementById("geo-q").value);
+        };
+      });
+    }
+
+    function gatherSearchQueries() {
+      const out = [];
+      const seen = new Set();
+      for (const sphere of state.meta.spheres) {
+        const picked = state.selected.get(sphere.id);
+        if (!picked || !picked.size) continue;
+        for (const opt of sphere.options) {
+          if (!picked.has(opt.id)) continue;
+          const key = opt.query.toLowerCase();
+          if (!seen.has(key)) {
+            seen.add(key);
+            out.push(opt.query);
+          }
+        }
+      }
+      return out;
+    }
+
+    function activeSphereIds() {
+      const ids = [];
+      for (const sphere of state.meta.spheres) {
+        const picked = state.selected.get(sphere.id);
+        if (picked && picked.size) ids.push(sphere.id);
+      }
+      return ids;
+    }
+
+    function renderSummary() {
+      const box = document.getElementById("summary");
+      const queries = gatherSearchQueries();
+      const phrase = document.getElementById("phrase").value.trim();
+      const spheres = activeSphereIds();
+      const parts = [];
+      parts.push(`<div><b>Где</b>${esc(geoLabel())}</div>`);
+      if (queries.length) {
+        parts.push(`<div style="margin-top:6px"><b>Поиск</b>${queries.map(esc).join(" · ")}</div>`);
+      }
+      if (phrase) {
+        parts.push(`<div style="margin-top:6px"><b>Уточнение здания</b>${esc(phrase)}</div>`);
+      }
+      if (spheres.length) {
+        const okvedLines = [];
+        for (const sid of spheres) {
+          const s = state.meta.spheres.find(x => x.id === sid);
+          if (!s) continue;
+          const codes = (s.okved || []).map(o => `${o.code} ${o.title}`).join("; ");
+          okvedLines.push(`${esc(s.title)}: ${esc(codes)}`);
+        }
+        parts.push(`<div style="margin-top:6px"><b>ОКВЭД сферы</b>${okvedLines.join("<br>")}</div>`);
+      }
+      if (state.manualOkved.length) {
+        parts.push(`<div style="margin-top:6px"><b>Доп. ОКВЭД</b>${state.manualOkved.map(esc).join(", ")}</div>`);
+      }
+      box.innerHTML = parts.length > 1 || queries.length || phrase || spheres.length || state.manualOkved.length
+        ? parts.join("")
+        : `<div><b>Где</b>${esc(geoLabel())}</div><span class="empty">Открой сферу и отметь тип здания — или уточни имя объекта.</span>`;
+    }
+
+    function renderPickedOkved() {
+      const box = document.getElementById("okved-picked");
+      box.innerHTML = state.manualOkved.map((code, i) => {
+        const item = (state.meta.okved || []).find(x => x.code === code);
+        const title = item ? item.title : "свой код";
+        return `<span class="tag"><b>${code}</b> ${title}<button data-i="${i}" type="button" aria-label="убрать">×</button></span>`;
+      }).join("");
+      box.querySelectorAll("button").forEach(btn => {
+        btn.onclick = () => { state.manualOkved.splice(Number(btn.dataset.i), 1); renderPickedOkved(); renderSummary(); };
+      });
+    }
+
+    function addOkved(code) {
+      code = (code || "").trim();
+      if (!code || state.manualOkved.includes(code) || state.manualOkved.length >= 8) return;
+      state.manualOkved.push(code);
+      renderPickedOkved();
+      renderSummary();
+    }
+
+    function renderOkvedList(q) {
+      q = (q || "").toLowerCase().trim();
+      const items = (state.meta.okved || []).filter(x =>
+        !q || x.code.includes(q) || x.title.toLowerCase().includes(q) || x.group.toLowerCase().includes(q)
+      ).slice(0, 60);
+      const box = document.getElementById("okved-list");
+      box.innerHTML = items.map(x =>
+        `<div class="item" data-code="${x.code}"><b>${x.code}</b>${x.title}<br><small>${x.group}</small></div>`
+      ).join("") || `<div class="item">Ничего не нашлось — введи код вручную.</div>`;
+      box.querySelectorAll(".item[data-code]").forEach(el => {
+        el.onclick = () => addOkved(el.dataset.code);
+      });
+    }
+
+    function renderSpheres() {
+      const root = document.getElementById("spheres");
+      root.innerHTML = state.meta.spheres.map(s => {
+        const open = state.openPanels.has(s.id);
+        const picked = state.selected.get(s.id) || new Set();
+        const options = s.options.map(o =>
+          `<button class="sub-chip${picked.has(o.id) ? " on" : ""}" type="button" data-sphere="${s.id}" data-opt="${o.id}">${esc(o.label)}</button>`
+        ).join("");
+        const okvedHint = (s.okved || []).map(o => `${o.code}`).join(", ");
+        return `
+          <div class="sphere-block" data-sphere="${s.id}">
+            <button class="chip${open ? " open on" : ""}" type="button" data-toggle="${s.id}">${esc(s.title)}${picked.size ? ` · ${picked.size}` : ""}</button>
+            <div class="sphere-panel${open ? " open" : ""}" id="panel-${s.id}">
+              <p class="hint">Отметь один или несколько вариантов. Панель можно свернуть — выбор сохранится.</p>
+              <div class="row">${options}</div>
+              <div class="sphere-okved">Фильтр ОКВЭД: ${esc(okvedHint)}</div>
+            </div>
+          </div>`;
+      }).join("");
+
+      root.querySelectorAll("[data-toggle]").forEach(btn => {
+        btn.onclick = () => {
+          const id = btn.dataset.toggle;
+          if (state.openPanels.has(id)) state.openPanels.delete(id);
+          else state.openPanels.add(id);
+          renderSpheres();
+        };
+      });
+      root.querySelectorAll(".sub-chip").forEach(btn => {
+        btn.onclick = () => {
+          const sid = btn.dataset.sphere;
+          const oid = btn.dataset.opt;
+          if (!state.selected.has(sid)) state.selected.set(sid, new Set());
+          const set = state.selected.get(sid);
+          if (set.has(oid)) set.delete(oid);
+          else set.add(oid);
+          if (!set.size) state.selected.delete(sid);
+          renderSpheres();
+          renderSummary();
+        };
+      });
+    }
+
+    async function load() {
+      await ensureAuth();
+      const res = await fetch(api("/api/meta"), { credentials: "same-origin", headers: headers() });
+      if (res.status === 401) {
+        document.getElementById("gate").classList.add("on");
+        document.getElementById("app-main").classList.add("hidden");
+        return;
+      }
+      state.meta = await res.json();
+      state.role = state.meta.role || state.role;
+      document.getElementById("guest-banner").classList.toggle("on", state.role === "guest");
+      document.getElementById("share-panel").classList.toggle("on", state.role === "staff" || state.role === "telegram");
+      const defaultCount = state.meta.counts.includes(10) ? 10 : state.meta.counts[0];
+      state.count = defaultCount;
+      document.getElementById("counts").innerHTML = state.meta.counts.map(n =>
+        `<button class="count${n === defaultCount ? " on" : ""}" type="button" data-n="${n}">${n}</button>`
+      ).join("");
+      document.getElementById("counts").querySelectorAll(".count").forEach(btn => {
+        btn.onclick = () => {
+          document.querySelectorAll(".count").forEach(x => x.classList.remove("on"));
+          btn.classList.add("on");
+          state.count = Number(btn.dataset.n);
+        };
+      });
+      document.getElementById("geo-all").onclick = () => setGeoAll(true);
+      const geoQ = document.getElementById("geo-q");
+      geoQ.addEventListener("input", e => {
+        const v = e.target.value;
+        if (v.includes(",")) {
+          const parts = v.split(",");
+          const last = parts.pop();
+          commitGeoInput(parts.join(","));
+          e.target.value = last;
+        }
+        renderGeoList(e.target.value);
+      });
+      geoQ.addEventListener("keydown", e => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commitGeoInput(geoQ.value);
+        }
+      });
+      renderFo();
+      renderGeoList("");
+      renderGeoTags();
+      renderSpheres();
+      renderOkvedList("");
+      renderPickedOkved();
+      renderSummary();
+    }
+
+    document.getElementById("okved-toggle").onclick = () => {
+      const body = document.getElementById("okved-adv");
+      const open = body.classList.toggle("open");
+      document.getElementById("okved-toggle").textContent = open ? "− Дополнительный фильтр ОКВЭД" : "+ Дополнительный фильтр ОКВЭД";
+    };
+    document.getElementById("okved-q").addEventListener("input", e => renderOkvedList(e.target.value));
+    document.getElementById("okved-add").onclick = () => {
+      addOkved(document.getElementById("okved-custom").value);
+      document.getElementById("okved-custom").value = "";
+    };
+    document.getElementById("phrase").addEventListener("input", () => renderSummary());
+
+    function etaLabel(count) {
+      const n = Math.max(1, Number(count) || 1);
+      const minM = Math.max(2, Math.round(n * 2.5));
+      const maxM = Math.max(minM + 1, Math.round(n * 5));
+      return `Ориентировочно ~${minM}–${maxM} мин на ${n} ${n === 1 ? "здание" : "зданий"}`;
+    }
+
+    function showHuntOverlay(step, count) {
+      const el = document.getElementById("hunt-overlay");
+      el.classList.add("on");
+      document.getElementById("hunt-overlay-eta").textContent = etaLabel(count || state.count);
+      document.getElementById("hunt-overlay-step").textContent = step || "Собираю данные…";
+    }
+
+    function updateHuntOverlay(step, data) {
+      const el = document.getElementById("hunt-overlay");
+      if (!el.classList.contains("on")) return;
+      if (step) document.getElementById("hunt-overlay-step").textContent = step;
+      const started = state.huntStartedAt || Date.now();
+      const elapsedSec = Math.max(1, Math.round((Date.now() - started) / 1000));
+      const target = Math.max(1, Number((data && data.target_count) || state.count) || 1);
+      const cards = ((data && data.companies) || []).length;
+      // Remaining estimate: ~180s per remaining card, floor 30s
+      const remainCards = Math.max(0, target - cards);
+      let remainSec = remainCards > 0 ? remainCards * 180 : 45;
+      if ((data && data.status) === "running" && cards >= 1) remainSec = Math.max(40, remainSec);
+      const etaMin = Math.max(1, Math.ceil(remainSec / 60));
+      const elapsedMin = Math.floor(elapsedSec / 60);
+      const elapsedPart = elapsedMin > 0
+        ? `${elapsedMin} мин ${elapsedSec % 60} с`
+        : `${elapsedSec} с`;
+      document.getElementById("hunt-overlay-eta").textContent =
+        `Прошло ${elapsedPart} · ещё примерно ~${etaMin} мин` +
+        (cards ? ` · карточек ${cards}/${target}` : "");
+    }
+
+    function hideHuntOverlay() {
+      document.getElementById("hunt-overlay").classList.remove("on");
+    }
+
+    async function poll(id) {
+      const res = await fetch(api("/api/hunt/" + id), { headers: headers(), credentials: "same-origin" });
+      if (res.status === 401) {
+        clearInterval(state.timer);
+        saveSession("");
+        hideHuntOverlay();
+        document.getElementById("go").disabled = false;
+        document.getElementById("status").innerHTML =
+          `<span class="err">Сессия истекла (401). Войди паролем снова и запусти охоту заново.</span>`;
+        document.getElementById("gate").classList.add("on");
+        document.getElementById("app-main").classList.add("hidden");
+        return;
+      }
+      if (!res.ok) {
+        document.getElementById("status").textContent = "Не удалось прочитать охоту";
+        updateHuntOverlay("Не удалось прочитать статус охоты…");
+        return;
+      }
+      const data = await res.json();
+      const status = data.status === "done"
+        ? "Охота завершена."
+        : data.status === "error"
+          ? "Охота завершилась с ошибкой."
+          : (data.progress || data.status);
+      document.getElementById("status").textContent = status;
+      updateHuntOverlay(data.progress || status, data);
+      if (data.status === "done" || data.status === "error") {
+        clearInterval(state.timer);
+        hideHuntOverlay();
+        document.getElementById("go").disabled = false;
+        const box = document.getElementById("results");
+        if (data.status === "error") {
+          box.innerHTML = `<div class="card err">Охота сломалась. ${ (data.errors || []).join("; ") }</div>`;
+          return;
+        }
+        const companies = data.companies || [];
+        if (!companies.length) {
+          const queries = (data.queries || []).map(esc).join(" · ");
+          box.innerHTML = `<div class="card">Принятых зданий с подтверждённым собственником нет.${queries ? `<div class="meta" style="margin-top:8px">Искали: ${queries}</div>` : ""} Добор «любыми компаниями» отключён: без здания карточки не будет. Уточни город / тип / имя объекта и запусти снова.</div>`;
+          return;
+        }
+        const queries = (data.queries || []).slice(0, 8).map(esc).join(" · ");
+        const qHint = queries
+          ? `<div class="results-head"><div><h2>Результаты · ${companies.length}</h2><div class="muted">Запросы: ${queries}</div></div></div>`
+          : `<div class="results-head"><div><h2>Результаты · ${companies.length}</h2><div class="muted">Объекты с кандидатом УК/оператором</div></div></div>`;
+        box.innerHTML = qHint + companies.map((c, i) => {
+          const p = c.presence || {};
+          const q = c.qualification || {};
+          const obj = c.object || {};
+          const kp = c.kp || {};
+          const stampRaw = String(c.stamp || c.stamp_label || "").toLowerCase();
+          const stampClass = /стоп|плох|отклон/.test(stampRaw)
+            ? "bad"
+            : /осторож|слаб/.test(stampRaw)
+              ? "warn"
+              : "";
+          const stampText = c.stamp_label || `${c.stamp || "лид"} · ${c.score ?? "—"}/99`;
+
+          const photoList = ((c.photos && c.photos.length ? c.photos : (p.photos && p.photos.value) || []) || [])
+            .map(u => String(u || "").replace(/\/(%s?|\{s\}|\{size\})$/i, "/orig"))
+            .filter(u => /^https?:\/\//i.test(u));
+          const photoNotes = ((obj.photo_notes || []).map(esc).join("; "));
+          const photosHtml = photoList.length
+            ? `<div class="photos">${photoList.slice(0, 5).map(u =>
+                `<a href="${esc(u)}" target="_blank" rel="noopener"><img src="${esc(u)}" alt="фасад" loading="lazy" onerror="this.closest('a').style.display='none'" /></a>`
+              ).join("")}</div>`
+            : `<div class="photo-empty">Фото фасада пока нет${photoNotes ? ` — ${photoNotes}` : ""}</div>`;
+
+          const presenceVal = (key) => {
+            const item = p[key] || {};
+            return String(item.value || "").trim();
+          };
+          const linkChip = (label, url) => {
+            if (!url) return "";
+            const href = /^https?:\/\//i.test(url) ? url : "";
+            if (href) {
+              return `<a class="cchip" href="${esc(href)}" target="_blank" rel="noopener">${esc(label)}</a>`;
+            }
+            return `<span class="cchip ghost">${esc(label)}: ${esc(url)}</span>`;
+          };
+          const phoneVal = presenceVal("phone");
+          const siteVal = presenceVal("site");
+          const emailVal = presenceVal("email");
+          const vkCo = presenceVal("vk_company") || ((p.vk_group || {}).value || "");
+          const vkLpr = presenceVal("vk_lpr");
+          const tg = presenceVal("telegram");
+          const wa = presenceVal("whatsapp");
+          const max = presenceVal("max");
+          const chips = [
+            phoneVal ? linkChip(phoneVal, phoneVal.startsWith("http") ? phoneVal : `tel:${phoneVal.replace(/[^\d+]/g, "")}`) : "",
+            siteVal ? linkChip("Сайт", siteVal.startsWith("http") ? siteVal : `https://${siteVal}`) : "",
+            emailVal ? linkChip("Email", `mailto:${emailVal}`) : "",
+            vkLpr ? linkChip("ВК · ЛПР", vkLpr) : "",
+            vkCo ? linkChip("ВК · компания", vkCo) : "",
+            tg ? linkChip("Telegram", tg.startsWith("http") ? tg : `https://t.me/${tg.replace(/^@/, "")}`) : "",
+            wa ? linkChip("WhatsApp", wa.startsWith("http") ? wa : `https://wa.me/${wa.replace(/\D/g, "")}`) : "",
+            max ? linkChip("Max", max) : "",
+          ].filter(Boolean).join("");
+
+          const director = c.management_label || c.management || "";
+          const directorPost = c.management_post || (q.non_object_legal_entity ? "Руководитель юрлица" : "Директор");
+          const rec = p.recommend || {};
+          const recHtml = (rec.status === "найдено" && rec.value)
+            ? `<div class="contact-main">${esc(rec.value)}</div>
+               ${rec.reason ? `<div class="contact-note">${esc(rec.reason)}</div>` : ""}
+               ${rec.opening ? `<div class="contact-note">${esc(rec.opening)}</div>` : ""}`
+            : (phoneVal
+              ? `<div class="contact-main"><a href="tel:${esc(phoneVal.replace(/[^\d+]/g, ""))}">${esc(phoneVal)}</a></div>
+                 <div class="contact-note">Телефон из открытых источников</div>`
+              : `<div class="contact-main">Прямой контакт не найден</div>
+                 <div class="contact-note">Смотри ВК / сайт ниже или уточни у оператора</div>`);
+
+          const foundersDetail = (c.founders_detail || []).slice(0, 5);
+          const founders = foundersDetail.length
+            ? foundersDetail.map(f => esc(f.label || [f.name, f.inn ? `ИНН ${f.inn}` : "", f.share ? `доля ${f.share}` : ""].filter(Boolean).join(" · "))).join("<br>")
+            : ((c.founders || []).slice(0, 5).map(esc).join("<br>") || "");
+          const managers = (c.managers || []).slice(0, 5).map(esc).join("<br>");
+          const moreRows = [
+            c.status ? ["Статус", esc(c.status)] : null,
+            c.okved ? ["ОКВЭД", esc(c.okved)] : null,
+            c.founded_at ? ["Основана", esc(c.founded_at)] : null,
+            c.address ? ["Юр. адрес", esc(c.address)] : null,
+            c.geo_note ? ["География", esc(c.geo_note)] : null,
+            c.employee_count ? ["Численность", esc(c.employee_count)] : null,
+            c.finance_year ? ["Фин. год", esc(c.finance_year)] : null,
+            c.assets_text ? ["Активы", esc(c.assets_text)] : null,
+            founders ? ["Учредители", founders] : null,
+            managers ? ["Менеджеры", managers] : null,
+            (obj.relation && obj.relation.found_via) || c.found_via
+              ? ["Как нашли", esc((obj.relation && obj.relation.found_via) || c.found_via)]
+              : null,
+          ].filter(Boolean);
+          const moreHtml = moreRows.length
+            ? `<details class="more"><summary>Подробнее о компании</summary>
+                <div class="more-body">${moreRows.map(([k, v]) =>
+                  `<div class="more-row"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`
+                ).join("")}</div></details>`
+            : "";
+
+          const financeBits = [
+            c.revenue_text ? `<span>Выручка <strong>${esc(c.revenue_text)}</strong></span>` : "",
+            c.profit_text ? `<span>Прибыль <strong>${esc(c.profit_text)}</strong></span>` : "",
+            c.employee_count ? `<span>Людей <strong>${esc(c.employee_count)}</strong></span>` : "",
+          ].filter(Boolean);
+          const financeHtml = financeBits.length
+            ? `<div class="finance-line">${financeBits.join("")}</div>`
+            : "";
+
+          const kpHtml = (kp.title || kp.offer)
+            ? `<div class="kp-ready"><b>${esc(kp.title || "КП")}</b>
+                ${kp.offer ? `<div>${esc(kp.offer)}</div>` : ""}
+                ${kp.message_short ? `<div class="contact-note" style="margin-top:8px">${esc(kp.message_short)}</div>` : ""}
+              </div>`
+            : `<div class="kp-actions">
+                <button type="button" class="go" data-kp-inn="${esc(c.inn || "")}">Взять в КП</button>
+              </div>`;
+
+          const mapLink = obj.maps_yandex
+            ? ` · <a href="${esc(obj.maps_yandex)}" target="_blank" rel="noopener">на карте</a>`
+            : "";
+
+          return `
+          <div class="card" data-card-inn="${esc(c.inn || "")}">
+            <div class="card-top">
+              <span class="stamp ${stampClass}">${esc(stampText)}</span>
+              <span class="card-num">#${i + 1}</span>
+            </div>
+            <div class="card-body">
+              <h3 class="obj-title">${esc(obj.title || c.name || "Объект")}</h3>
+              <div class="obj-addr">${esc(obj.address || c.object_address || "Адрес уточняется")}${mapLink}</div>
+              ${photosHtml}
+
+              <div class="hl-grid">
+                <div class="hl wide">
+                  <span class="lab">Компания</span>
+                  <div class="val lg">${esc(c.name || "—")}</div>
+                  <div class="sub">ИНН ${esc(c.inn || "—")}${c.status ? ` · ${esc(c.status)}` : ""}</div>
+                </div>
+                <div class="hl accent wide">
+                  <span class="lab">Кому звонить / писать</span>
+                  <div class="val lg">${esc(director || "Директор не найден")}</div>
+                  <div class="sub">${esc(directorPost)}</div>
+                </div>
+              </div>
+
+              <div class="contact-panel">
+                <h4>Первый контакт</h4>
+                ${recHtml}
+                ${chips ? `<div class="chip-row">${chips}</div>` : ""}
+              </div>
+
+              ${financeHtml}
+              ${moreHtml}
+              ${c.stamp_hint ? `<div class="stamp-hint">${esc(c.stamp_hint)}</div>` : ""}
+              ${kpHtml}
+            </div>
+          </div>`;
+        }).join("");
+        box.querySelectorAll("[data-kp-inn]").forEach(btn => {
+          btn.addEventListener("click", async () => {
+            const inn = btn.getAttribute("data-kp-inn") || "";
+            if (!inn) return;
+            btn.disabled = true;
+            btn.textContent = "Сохраняю…";
+            try {
+              const res = await fetch(api("/api/company/kp"), {
+                method: "POST",
+                headers: headers(),
+                credentials: "same-origin",
+                body: JSON.stringify({ inn, init_data: tg ? tg.initData : "", token })
+              });
+              const text = await res.text();
+              if (!res.ok) throw new Error(text || "ошибка");
+              const card = box.querySelector(`[data-card-inn="${inn}"]`);
+              if (card) card.remove();
+              if (!box.querySelector(".card")) {
+                box.innerHTML = `<div class="card">Карточки убраны в КП. Смотри историю ниже.</div>`;
+              }
+              loadKpHistory().catch(() => {});
+            } catch (err) {
+              btn.disabled = false;
+              btn.textContent = "Взять в КП";
+              document.getElementById("status").innerHTML = `<span class="err">${esc(err.message || err)}</span>`;
+            }
+          });
+        });
+      }
+    }
+
+    document.getElementById("go").onclick = async () => {
+      const phrase = document.getElementById("phrase").value.trim();
+      const search_queries = gatherSearchQueries();
+      const spheres = activeSphereIds();
+      const cities = state.geoAll ? [] : [...state.geoCities];
+      const regions = state.geoAll ? [] : [...state.geoRegions];
+      if (!phrase && !search_queries.length && !state.manualOkved.length) {
+        document.getElementById("status").textContent = "Открой сферу и отметь тип здания, или уточни имя объекта, или добавь ОКВЭД.";
+        return;
+      }
+      document.getElementById("go").disabled = true;
+      document.getElementById("results").innerHTML = "";
+      document.getElementById("status").textContent = "Запускаю агентов…";
+      state.huntStartedAt = Date.now();
+      showHuntOverlay("Собираю здания, юрлица, ФИО руководителей и контакты…", state.count);
+      try {
+        const res = await fetch(api("/api/hunt"), {
+          method: "POST",
+          headers: headers(),
+          credentials: "same-origin",
+          body: JSON.stringify({
+            phrase,
+            search_queries,
+            city: "",
+            cities,
+            regions,
+            okved: state.manualOkved,
+            spheres,
+            count: state.count,
+            init_data: tg ? tg.initData : "",
+            token
+          })
+        });
+        const text = await res.text();
+        if (!res.ok) {
+          hideHuntOverlay();
+          document.getElementById("status").innerHTML = `<span class="err">${text}</span>`;
+          document.getElementById("go").disabled = false;
+          return;
+        }
+        const data = JSON.parse(text);
+        state.huntId = data.id;
+        if (state.timer) clearInterval(state.timer);
+        updateHuntOverlay(
+          "Охота запущена · здания → юрлица → ФИО → ВК/контакты (~2.5–5 мин на объект)",
+          { target_count: state.count, status: "running", companies: [] }
+        );
+        await poll(data.id);
+        state.timer = setInterval(() => poll(data.id), 1200);
+      } catch (err) {
+        hideHuntOverlay();
+        document.getElementById("status").innerHTML = `<span class="err">${esc(err.message || err)}</span>`;
+        document.getElementById("go").disabled = false;
+      }
+    };
+
+    async function loadKpHistory() {
+      const box = document.getElementById("kp-history");
+      if (!box) return;
+      try {
+        const res = await fetch(api("/api/kp"), { headers: headers(), credentials: "same-origin" });
+        if (!res.ok) {
+          box.innerHTML = `<div class="meta">История КП недоступна</div>`;
+          return;
+        }
+        const data = await res.json();
+        const items = data.items || [];
+        if (!items.length) {
+          box.innerHTML = `<div class="card">Пока пусто — нажми «Взять в КП» на карточке охоты.</div>`;
+          return;
+        }
+        box.innerHTML = items.map(it => {
+          const title = it.object_title || it.name || "Объект";
+          const when = (it.kp_at || "").replace("T", " ").slice(0, 16);
+          const photos = (it.photos || []).slice(0, 3).map(u =>
+            `<a href="${esc(u)}" target="_blank" rel="noopener"><img src="${esc(u)}" alt="" loading="lazy" /></a>`
+          ).join("");
+          return `<div class="card">
+            <div class="card-top">
+              <span class="stamp">В КП${when ? ` · ${esc(when)}` : ""}</span>
+            </div>
+            <div class="card-body">
+              <h3 class="obj-title" style="font-size:18px">${esc(title)}</h3>
+              <div class="obj-addr">${esc(it.name || "")}${it.inn ? ` · ИНН ${esc(it.inn)}` : ""}</div>
+              ${it.object_address || it.address ? `<div class="obj-addr">${esc(it.object_address || it.address)}</div>` : ""}
+              ${it.management || it.phone ? `
+                <div class="hl-grid" style="margin-top:12px">
+                  ${it.management ? `<div class="hl accent${it.phone ? "" : " wide"}"><span class="lab">ЛПР</span><div class="val">${esc(it.management)}</div></div>` : ""}
+                  ${it.phone ? `<div class="hl${it.management ? "" : " wide"}"><span class="lab">Телефон</span><div class="val">${esc(it.phone)}</div></div>` : ""}
+                </div>` : ""}
+              ${photos ? `<div class="photos">${photos}</div>` : ""}
+            </div>
+          </div>`;
+        }).join("");
+      } catch (err) {
+        box.innerHTML = `<div class="meta err">${esc(err.message || err)}</div>`;
+      }
+    }
+
+    document.getElementById("kp-refresh")?.addEventListener("click", () => loadKpHistory());
+
+    load().catch(err => {
+      if (String(err && err.message) === "login") return;
+      document.getElementById("status").innerHTML = `<span class="err">${esc(err.message || err)}</span>`;
+    });
+    // Load KP history after auth settles
+    setTimeout(() => { loadKpHistory().catch(() => {}); }, 800);
+  </script>
+</body>
+</html>
