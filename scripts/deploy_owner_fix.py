@@ -31,9 +31,10 @@ def main() -> None:
 
     client = ssh_connect(env)
     sftp = client.open_sftp()
-    print("upload app/web")
+    print("upload app/web/tests")
     put_dir(sftp, ROOT / "app", "/opt/niteos/app")
     put_dir(sftp, ROOT / "web", "/opt/niteos/web")
+    put_dir(sftp, ROOT / "tests", "/opt/niteos/tests")
     sftp.close()
 
     sync = f"""
@@ -50,11 +51,16 @@ keys['ROUTERAI_API_KEY'] = {key!r}
 keys['ROUTER_API_KEY'] = {key!r}
 keys['ROUTERAI_BASE_URL'] = {base!r}
 keys['ROUTERAI_MODEL'] = {model!r}
+keys['HUNT_CHEAP_MODE'] = '1'
 keys['HUNT_LLM_WEB'] = '0'
 keys['HUNT_LLM_VERIFY'] = '0'
 keys['HUNT_LLM_OWNER'] = '0'
 p.write_text('\\n'.join(f'{{k}}={{v}}' for k,v in keys.items()) + '\\n', encoding='utf-8')
-print('synced_router', bool(keys.get('ROUTERAI_API_KEY')), 'llm_web', keys.get('HUNT_LLM_WEB'))
+print(
+    'synced_router', bool(keys.get('ROUTERAI_API_KEY')),
+    'cheap', keys.get('HUNT_CHEAP_MODE'),
+    'llm_web', keys.get('HUNT_LLM_WEB'),
+)
 PY
 """
     code, text = run(client, sync, timeout=20)
@@ -64,14 +70,15 @@ PY
         client,
         "systemctl kill -s SIGKILL niteos-bot || true; sleep 1; "
         "systemctl reset-failed niteos-bot || true; "
-        "systemctl start niteos-bot; sleep 3; "
+        "systemctl start niteos-bot; sleep 4; "
         "systemctl is-active niteos-bot; "
         "curl -sS -o /dev/null -w 'root=%{http_code}\\n' "
         "--max-time 8 http://127.0.0.1:8088/; "
         "cd /opt/niteos && PYTHONPATH=/opt/niteos .venv/bin/python -c "
-        "\"from app.cost_guard import llm_web_enabled,llm_verify_enabled,llm_owner_enabled; "
-        "print('web',llm_web_enabled(),'verify',llm_verify_enabled(),'owner',llm_owner_enabled())\"",
-        timeout=50,
+        "\"from app.cost_guard import cheap_mode_enabled,llm_web_enabled,llm_verify_enabled,llm_owner_enabled; "
+        "print('cheap',cheap_mode_enabled(),'web',llm_web_enabled(),"
+        "'verify',llm_verify_enabled(),'owner',llm_owner_enabled())\"",
+        timeout=60,
     )
     print("bot", (text or "").encode("ascii", "replace").decode())
     client.close()

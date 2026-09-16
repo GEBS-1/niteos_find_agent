@@ -24,21 +24,81 @@ export type Company = {
   management?: string;
   management_label?: string;
   management_post?: string;
+  management_org?: string;
+  management_org_post?: string;
+  founders?: string[];
+  managers?: string[];
+  people_contacts?: Array<{
+    name?: string;
+    role?: string;
+    phone?: string;
+    email?: string;
+    vk?: string;
+    telegram?: string;
+    whatsapp?: string;
+    source?: string;
+    why?: string;
+  }>;
   revenue_text?: string;
   profit_text?: string;
   expense_text?: string;
+  finance_year?: string;
   photos?: string[];
+  emails?: string[];
+  sites?: string[];
+  card_audit?: {
+    verdict?: string;
+    reason?: string;
+    contacts_ok?: boolean;
+    swapped?: boolean;
+    use_inn?: string;
+  };
+  owner_candidates?: Array<{
+    inn?: string;
+    source?: string;
+    resolver_score?: number;
+    resolver_reasons?: string[];
+    party?: {
+      name?: string;
+      address?: string;
+      okved?: string;
+    };
+  }>;
+  lighting?: {
+    score?: number;
+    status?: string;
+    reasons?: string[];
+  };
   object?: {
     title?: string;
     address?: string;
     maps_yandex?: string;
     photo_notes?: string[];
-    relation?: { status?: string; confidence?: number; found_via?: string };
+    relation?: {
+      status?: string;
+      confidence?: number;
+      found_via?: string;
+      llm_audit?: string;
+      llm_reason?: string;
+    };
   };
   presence?: Record<string, PresenceItem> & {
     recommend?: PresenceItem;
     photos?: PresenceItem & { value?: string[] | string };
     vk_group?: PresenceItem & { contacts?: Array<Record<string, string>> };
+    people?: PresenceItem & {
+      value?: Array<{
+        name?: string;
+        role?: string;
+        phone?: string;
+        email?: string;
+        vk?: string;
+        telegram?: string;
+        whatsapp?: string;
+        source?: string;
+        why?: string;
+      }>;
+    };
   };
   kp?: { title?: string; offer?: string; message_short?: string };
 };

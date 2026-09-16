@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -12,10 +13,13 @@ import httpx
 
 from app.config import Settings
 from app import db
+from app.cost_guard import cheap_mode_enabled, llm_oneshot_enabled
 from app.dadata import DaData
+from app.card_audit import run_final_card_audit
 from app.contacts import enrich_contacts
 from app.enrich import FnsBfo, enrich_from_dadata, format_money_rub, merge_fns_finance
 from app.llm import RouterAI
+from app.llm_oneshot import build_cards_oneshot
 from app.geo_tree import address_matches_geo, dadata_locations_multi, parse_geo_selection
 from app.objects import (
     MIN_PHOTO_RELATION_CONFIDENCE,
@@ -32,6 +36,7 @@ from app.objects import (
     object_photo_ok,
     recommend_object,
     relation_accepted,
+    relation_usable,
     search_objects,
     short_company_label,
     streetish_address,
@@ -49,6 +54,17 @@ from app.spheres import SPHERES, parse_okved
 log = logging.getLogger(__name__)
 
 Progress = Callable[[str], Awaitable[None]]
+
+_COMPANY_ADDRESS_FALLBACK_SPHERES = {
+    "commercial",
+    "office",
+    "warehouse",
+    "industry",
+    "azs",
+    "housing",
+    "social",
+    "sports",
+}
 
 
 def _score(
@@ -93,7 +109,7 @@ def _score(
     base = min(base, 99)
     if base >= 70:
         stamp = "в работу"
-        hint = "Приоритет высокий: можно звонить / писать"
+        hint = "Приоритет высокий: объект подходит; личный контакт ЛПР нужно подтвердить"
     elif base >= 55:
         stamp = "осторожно"
         hint = "Средний приоритет: проверить контакты и объект"
@@ -105,6 +121,55 @@ def _score(
 
 def stamp_label(stamp: str, score: int) -> str:
     return f"{stamp} · приоритет {score}/99"
+
+
+def lighting_score(card: dict[str, Any]) -> dict[str, Any]:
+    """V5 sales-card signal: whether this object is worth lighting work."""
+    obj = card.get("object") or {}
+    photos = [str(u) for u in (card.get("photos") or []) if str(u).strip()]
+    map_url = str(obj.get("maps_yandex") or "")
+    title = str(obj.get("title") or card.get("name") or "").lower().replace("ё", "е")
+    notes = " ".join(str(x) for x in (obj.get("photo_notes") or [])).lower()
+
+    score = 0
+    reasons: list[str] = []
+    if photos:
+        score += 30
+        reasons.append("есть фото фасада")
+    if map_url:
+        score += 20
+        reasons.append("есть ссылка на карты/панораму")
+    if any(x in notes for x in ("снаружи", "фасад", "обложка яндекс")):
+        score += 15
+        reasons.append("фото похоже на внешний вид здания")
+    if any(
+        x in title
+        for x in (
+            "бизнес",
+            "бц",
+            "тц",
+            "трц",
+            "гостиниц",
+            "отел",
+            "завод",
+            "арена",
+            "стадион",
+            "жк",
+            "склад",
+        )
+    ):
+        score += 20
+        reasons.append("тип здания подходит под архитектурную подсветку")
+    if obj.get("address") or card.get("object_address"):
+        score += 10
+        reasons.append("есть адрес для выезда/проверки")
+
+    score = min(score, 100)
+    return {
+        "score": score,
+        "status": "high" if score >= 75 else "medium" if score >= 50 else "low",
+        "reasons": reasons,
+    }
 
 
 def _filter_object_photos(flat: dict[str, Any]) -> None:
@@ -172,6 +237,12 @@ def _idea(sphere_ids: list[str], phrase: str) -> str:
     if phrase.strip():
         return f"По запросу «{phrase.strip()}»: подобрать линейку Нитеос под объект"
     return "Нужна линейка под тип объекта"
+
+
+def _object_card_id(title: str, address: str) -> str:
+    raw = re.sub(r"\s+", " ", f"{title}|{address}".lower().replace("ё", "е")).strip()
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+    return f"OBJ-{digest}"
 
 
 def _okved_prefixes(sphere_ids: list[str], extra: list[str]) -> list[str]:
@@ -315,6 +386,7 @@ async def run_hunt(
         settings.router_api_key,
         base_url=settings.router_base_url,
         model=settings.router_model,
+        timeout=120.0,
     )
     found: list[dict[str, Any]] = []
     skipped = 0
@@ -327,6 +399,7 @@ async def run_hunt(
     prefixes = _okved_prefixes(sphere_ids, extra_okved)
     target_count = max(1, min(int(target_count), 50))
     geo_active = bool(sel_cities or sel_regions)
+    cheap_mode = cheap_mode_enabled()
 
     async def take(
         item: dict[str, Any],
@@ -387,17 +460,124 @@ async def run_hunt(
         return True
 
     try:
+        jobs = _queries(
+            sphere_ids, phrase, extra_okved, search_queries=search_queries
+        )
+        sphere0 = sphere_ids[0] if sphere_ids else ""
+        query_main = (
+            phrase.strip()
+            or ((search_queries or [""])[0] if search_queries else "")
+            or (jobs[0] if jobs else "объект")
+        ).strip()
+
+        oneshot_seed: list[dict[str, Any]] = []
+        if llm_oneshot_enabled() and llm.available:
+            await progress(
+                f"Охота #{hunt_id}\n"
+                f"Где: {geo_label}\n"
+                f"Нужно карточек: {target_count}\n"
+                f"Режим: один LLM-запрос -> сразу карточки.\n"
+                f"Запрос: «{query_main}»"
+            )
+            oneshot_cards: list[dict[str, Any]] = []
+            try:
+                oneshot_cards = await asyncio.wait_for(
+                    build_cards_oneshot(
+                        llm,
+                        query=query_main,
+                        city=geo_label or city_store or "",
+                        count=target_count,
+                        sphere=sphere0,
+                        idea=_idea(sphere_ids, phrase),
+                        dadata=dadata,
+                        fns=fns,
+                    ),
+                    timeout=110.0,
+                )
+            except asyncio.TimeoutError:
+                errors.append("llm-oneshot: timeout")
+                await progress("LLM oneshot: таймаут — запасной пайплайн…")
+            except Exception as exc:
+                log.exception("llm oneshot failed")
+                errors.append(f"llm-oneshot: {exc}")
+                await progress(f"LLM oneshot ошибка — запасной пайплайн: {exc}")
+
+            verified_oneshot: list[dict[str, Any]] = []
+            for card in oneshot_cards:
+                inn = str(card.get("inn") or "")
+                if not inn:
+                    continue
+                if inn in kp_done:
+                    skipped += 1
+                    await db.add_result(database, hunt_id, inn, skipped=True)
+                    continue
+                if any(str(p.get("inn") or "") == inn for p in verified_oneshot):
+                    continue
+                card["stamp_label"] = stamp_label(
+                    str(card.get("stamp") or ""), int(card.get("score") or 0)
+                )
+                # Persist full card blob so КП/история видят контакты и объект.
+                card_payload = {
+                    k: v
+                    for k, v in card.items()
+                    if k not in {"payload"}
+                }
+                await db.save_company(
+                    database,
+                    {
+                        **card,
+                        "payload": card_payload,
+                        "source": "llm_oneshot",
+                    },
+                )
+                await db.update_company(
+                    database,
+                    inn,
+                    {
+                        "name": card.get("name"),
+                        "ogrn": card.get("ogrn"),
+                        "okved": card.get("okved"),
+                        "address": card.get("address"),
+                        "status": card.get("status"),
+                        "management": card.get("management_label")
+                        or card.get("management"),
+                        "stamp": card.get("stamp"),
+                        "score": card.get("score"),
+                        "idea": card.get("idea"),
+                        "payload_json": json.dumps(card_payload, ensure_ascii=False),
+                    },
+                )
+                await db.add_result(database, hunt_id, inn, skipped=False)
+                verified_oneshot.append(card)
+                if len(verified_oneshot) >= target_count:
+                    break
+
+            if verified_oneshot:
+                await progress(
+                    f"LLM oneshot: найдено объектов {len(verified_oneshot)}/{target_count} — "
+                    "дальше ищем владельцев/людей/личные контакты"
+                )
+                oneshot_seed = list(verified_oneshot)
+                for card in oneshot_seed:
+                    if not any(str(p.get("inn") or "") == str(card.get("inn") or "") for p in found):
+                        found.append(card)
+                await progress(
+                    f"LLM oneshot дал {len(verified_oneshot)} объект(ов). "
+                    "Запускаем обязательную сверку людей и личных каналов…"
+                )
+            else:
+                await progress(
+                    "LLM oneshot пусто — запасной пайплайн (карты/DaData)…"
+                )
+
         await progress(
             f"Охота #{hunt_id}\n"
             f"Где: {geo_label}\n"
             f"Нужно зданий с собственником: {target_count}\n"
             f"Уже в КП: {already} — их не берём.\n"
-            f"Только: здание -> проверка -> юрлицо -> проверка связи -> контакты."
+            f"Уже от oneshot: {len(oneshot_seed)}. "
+            f"Добор: здание -> юрлицо -> контакты -> LLM-аудит."
         )
-        jobs = _queries(
-            sphere_ids, phrase, extra_okved, search_queries=search_queries
-        )
-        sphere0 = sphere_ids[0] if sphere_ids else ""
         object_hits = 0
         http = httpx.AsyncClient(
             timeout=18.0,
@@ -423,6 +603,7 @@ async def run_hunt(
             rec: dict[str, Any],
             *,
             with_photos: bool = True,
+            rel_hint: dict[str, Any] | None = None,
         ) -> None:
             title = str(obj.get("title") or "")
             if is_tenant_inside_host(title):
@@ -454,20 +635,35 @@ async def run_hunt(
                     ),
                 }
             rel = object_company_relation(party, obj)
+            # Keep soft «из источника» when hard relation is weak — product rule
+            if rel_hint and relation_usable(rel_hint, allow_source=True):
+                if not relation_accepted(rel, min_score=MIN_RELATION_CONFIDENCE):
+                    rel = dict(rel_hint)
+                elif rel_hint.get("soft"):
+                    rel = {
+                        **rel,
+                        "found_via": rel_hint.get("found_via") or rel.get("found_via"),
+                        "found_query": rel_hint.get("found_query") or "",
+                    }
             photo_notes: list[str] = []
             photos: list[str] = []
             title_for_photo = str(obj.get("title") or "")
             soft_photo = is_school_building_title(title_for_photo) or is_sports_building_title(
                 title_for_photo
             )
-            if with_photos and relation_accepted(
+            photo_ok = relation_usable(
                 rel,
                 min_score=(
                     MIN_RELATION_CONFIDENCE
                     if soft_photo
                     else MIN_PHOTO_RELATION_CONFIDENCE
                 ),
-            ):
+                allow_source=True,
+            ) or relation_accepted(
+                rel,
+                min_score=MIN_RELATION_CONFIDENCE if soft_photo else MIN_PHOTO_RELATION_CONFIDENCE,
+            )
+            if with_photos and photo_ok:
                 photo_obj = {
                     **obj,
                     "city": (obj.get("city") or (sel_cities[0] if sel_cities else "") or ""),
@@ -475,8 +671,16 @@ async def run_hunt(
                 photos, photo_notes = await collect_object_photos(http, photo_obj)
             elif with_photos:
                 photo_notes = [
-                    "Фото не брали: связь юрлица со зданием слабее порога сверки"
+                    "Фото: ищем по названию/картам даже при мягкой связи"
                 ]
+                photo_obj = {
+                    **obj,
+                    "city": (obj.get("city") or (sel_cities[0] if sel_cities else "") or ""),
+                }
+                try:
+                    photos, photo_notes = await collect_object_photos(http, photo_obj)
+                except Exception:
+                    photos, photo_notes = [], ["фото не удалось собрать"]
             party["object"] = {
                 "title": obj.get("title") or "",
                 "address": obj.get("address") or "",
@@ -496,7 +700,7 @@ async def run_hunt(
 
         async def pick_owner_for_building(
             obj: dict[str, Any], *, query: str
-        ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, list[dict[str, Any]]]:
             """Multi-path owner/UK discovery, then relation gate."""
             name_q = str(obj.get("title") or "").strip()
             city_q = str(obj.get("city") or "").strip() or (
@@ -512,7 +716,7 @@ async def run_hunt(
                         city=city_q,
                         llm=llm,
                     ),
-                    timeout=55.0,
+                    timeout=8.0 if cheap_mode else 55.0,
                 )
             except asyncio.TimeoutError:
                 log.warning("resolve_building_owners timeout for %s", name_q)
@@ -527,7 +731,7 @@ async def run_hunt(
                     f"Собственник «{name_q}»: {candidate_sources_summary(cands)}"
                 )
             seen_inn: set[str] = set()
-            best_reject: tuple[int, str] = (0, "")
+            best_soft: tuple[int, Any, dict[str, Any] | None] = (-1, None, None)
             for cand in cands:
                 inn = str(cand.get("inn") or "")
                 if inn and inn in seen_inn:
@@ -538,35 +742,139 @@ async def run_hunt(
                 if not suggest:
                     continue
                 party_probe = candidate_party(cand) or enrich_from_dadata(suggest)
-                # Tag which path found this candidate
                 party_probe["owner_source"] = cand.get("source") or ""
+                cand["party"] = {
+                    "name": party_probe.get("name"),
+                    "address": party_probe.get("address"),
+                    "okved": party_probe.get("okved"),
+                }
                 rel = object_company_relation(party_probe, obj)
                 try:
                     conf = int((rel or {}).get("confidence") or 0)
                 except (TypeError, ValueError):
                     conf = 0
-                if conf > best_reject[0]:
-                    best_reject = (
-                        conf,
-                        f"{inn} conf={conf} {(party_probe.get('name') or '')[:50]}",
-                    )
-                if not relation_accepted(rel, min_score=MIN_RELATION_CONFIDENCE):
-                    continue
-                # Keep source on relation for UI/debug
-                if isinstance(rel, dict):
-                    rel = {
-                        **rel,
+                resolver_score = int(cand.get("resolver_score") or 0)
+                soft_score = max(conf, resolver_score)
+                if soft_score > best_soft[0]:
+                    soft_rel = {
+                        **(rel if isinstance(rel, dict) else {}),
+                        "status": "из источника (связь не доказана)",
+                        "confidence": min(max(soft_score, 20), 49),
+                        "role": "кандидат из реестра/поиска",
+                        "reason": "; ".join(
+                            list(cand.get("resolver_reasons") or [])
+                            or [str((rel or {}).get("reason") or "ИНН из открытого источника")]
+                        )[:400],
+                        "soft": True,
                         "found_via": cand.get("source") or "",
                         "found_query": cand.get("query") or query,
                     }
-                return suggest, rel
-            if cands and best_reject[1]:
+                    best_soft = (soft_score, suggest, soft_rel)
+                if relation_accepted(rel, min_score=MIN_RELATION_CONFIDENCE):
+                    if isinstance(rel, dict):
+                        rel = {
+                            **rel,
+                            "found_via": cand.get("source") or "",
+                            "found_query": cand.get("query") or query,
+                        }
+                    return suggest, rel, cands
+            # Product rule: take best source candidate even without hard proof
+            if best_soft[1] is not None and best_soft[0] >= 20:
                 log.info(
-                    "owner relation rejected for %s — best was %s",
+                    "soft-accept owner for %s score=%s",
                     name_q,
-                    best_reject[1],
+                    best_soft[0],
                 )
-            return None, None
+                return best_soft[1], best_soft[2], cands
+            return None, None, cands
+
+        async def keep_building_without_owner(
+            obj: dict[str, Any],
+            rec: dict[str, Any],
+            *,
+            query: str,
+            owner_cands: list[dict[str, Any]] | None = None,
+        ) -> bool:
+            title = str(obj.get("title") or "").strip()
+            addr = str(obj.get("address") or "").strip()
+            if not title:
+                return False
+            pseudo_inn = _object_card_id(title, addr)
+            if pseudo_inn in kp_done or any(str(p.get("inn") or "") == pseudo_inn for p in found):
+                return False
+            maps = str(obj.get("maps_yandex") or "")
+            org_maps = bool(maps) and "/org/" in maps and "text=" not in maps
+            if (
+                not org_maps
+                and title
+                and addr
+                and (not maps or "text=" in maps or "pt=" in maps)
+            ):
+                pin = f"{title} {addr}".strip()
+                obj = {
+                    **obj,
+                    "maps_yandex": f"https://yandex.ru/maps/?text={quote_plus(pin)}",
+                    "maps_google": (
+                        "https://www.google.com/maps/search/?api=1&query="
+                        + quote_plus(pin)
+                    ),
+                }
+            try:
+                photos, photo_notes = await collect_object_photos(
+                    http,
+                    {
+                        **obj,
+                        "city": (obj.get("city") or (sel_cities[0] if sel_cities else "") or ""),
+                    },
+                )
+            except Exception:
+                photos, photo_notes = [], ["фото не удалось собрать"]
+            rel = {
+                "status": "владелец не найден",
+                "confidence": 10,
+                "role": "собственник/оператор требует проверки",
+                "reason": "здание найдено, но юрлицо не подтвердилось в быстрых источниках",
+                "soft": True,
+                "found_via": "object-only",
+                "found_query": query,
+            }
+            party = {
+                "inn": pseudo_inn,
+                "ogrn": "",
+                "name": title,
+                "okved": "",
+                "address": addr,
+                "status": "",
+                "management": "",
+                "sphere": sphere0,
+                "idea": _idea(sphere_ids, phrase),
+                "source": "object_only",
+                "found_via": f"{query} · объект без юрлица",
+                "object_address": addr,
+                "object": {
+                    "title": title,
+                    "address": addr,
+                    "source": obj.get("source") or "maps",
+                    "url_2gis": obj.get("url_2gis") or "",
+                    "url_osm": obj.get("url_osm") or "",
+                    "maps_yandex": obj.get("maps_yandex") or "",
+                    "maps_google": obj.get("maps_google") or "",
+                    "recommend": rec,
+                    "relation": rel,
+                    "photo_notes": photo_notes,
+                    "verified": False,
+                },
+                "photos": photos,
+                "owner_candidates": owner_cands or [],
+                "payload": {
+                    "object_only": True,
+                    "real_inn_missing": True,
+                },
+            }
+            await db.save_company(database, party)
+            await db.add_result(database, hunt_id, pseudo_inn, skipped=False)
+            found.append(party)
+            return True
 
         try:
             for query in jobs:
@@ -592,8 +900,13 @@ async def run_hunt(
                             ]
                         ),
                         limit=max(
-                            target_count * (5 if sphere0 == "social" else 3),
-                            20 if sphere0 == "social" else 12,
+                            target_count
+                            * (
+                                3
+                                if sphere0 == "social"
+                                else (2 if cheap_mode else 3)
+                            ),
+                            10 if cheap_mode else (20 if sphere0 == "social" else 12),
                         ),
                     )
                 except Exception as exc:
@@ -601,8 +914,10 @@ async def run_hunt(
                     errors.append(f"объекты {query}: {exc}")
                     objects = []
 
+                # Keep a few spare buildings: final LLM audit may reject bad glue.
+                found_budget = target_count if cheap_mode else target_count + min(3, max(1, target_count))
                 for obj in objects:
-                    if len(found) >= target_count:
+                    if len(found) >= found_budget:
                         break
                     title = str(obj.get("title") or "")
                     addr = str(obj.get("address") or "")
@@ -631,12 +946,26 @@ async def run_hunt(
                         f"Здание ок: «{title}» -> ищем собственника/УК "
                         f"({len(found)}/{target_count})"
                     )
-                    owner_item, rel = await pick_owner_for_building(obj, query=query)
+                    owner_item, rel, owner_cands = await pick_owner_for_building(
+                        obj, query=query
+                    )
                     if not owner_item or not rel:
                         owners_rejected += 1
-                        await progress(
-                            f"Юрлицо для «{title}» не подтверждено — здание пропускаем"
+                        kept = await keep_building_without_owner(
+                            obj,
+                            rec,
+                            query=query,
+                            owner_cands=owner_cands,
                         )
+                        if kept:
+                            used_buildings.add(bkey)
+                            await progress(
+                                f"Юрлицо для «{title}» не найдено — карточку оставили для проверки"
+                            )
+                        else:
+                            await progress(
+                                f"Юрлицо для «{title}» не найдено — объект уже был в выдаче"
+                            )
                         continue
                     before = len(found)
                     ok = await take(
@@ -644,38 +973,127 @@ async def run_hunt(
                     )
                     if not ok or len(found) <= before:
                         owners_rejected += 1
-                        continue
-                    await attach_object(found[-1], obj, rec, with_photos=True)
-                    # Final gate after attach (relation recomputed inside attach)
-                    final_rel = (found[-1].get("object") or {}).get("relation") or rel
-                    if not relation_accepted(
-                        final_rel, min_score=MIN_RELATION_CONFIDENCE
-                    ):
-                        # Roll back card — do not process contacts for bad link
-                        bad = found.pop()
-                        owners_rejected += 1
-                        inn_bad = str(bad.get("inn") or "")
-                        if inn_bad:
-                            try:
-                                await db.add_result(
-                                    database, hunt_id, inn_bad, skipped=True
-                                )
-                            except Exception:
-                                pass
-                        await progress(
-                            f"Связь с «{title}» слабая — карточку не берём"
+                        kept = await keep_building_without_owner(
+                            obj,
+                            rec,
+                            query=query,
+                            owner_cands=owner_cands,
                         )
+                        if kept:
+                            used_buildings.add(bkey)
+                            await progress(
+                                f"Юрлицо для «{title}» не прошло фильтр — карточку здания оставили"
+                            )
                         continue
+                    await attach_object(
+                        found[-1], obj, rec, with_photos=True, rel_hint=rel
+                    )
+                    found[-1]["owner_candidates"] = owner_cands or []
+                    # Soft product gate: keep source candidates; only drop empty relation
+                    final_rel = (found[-1].get("object") or {}).get("relation") or rel
+                    if not relation_usable(
+                        final_rel, min_score=MIN_RELATION_CONFIDENCE, allow_source=True
+                    ):
+                        owners_rejected += 1
+                        obj_saved = found[-1].get("object") if isinstance(found[-1].get("object"), dict) else {}
+                        obj_saved["relation"] = {
+                            **(final_rel if isinstance(final_rel, dict) else {}),
+                            "status": "связь требует проверки",
+                            "confidence": int((final_rel or {}).get("confidence") or 20) if isinstance(final_rel, dict) else 20,
+                            "soft": True,
+                        }
+                        found[-1]["object"] = obj_saved
+                        await progress(
+                            f"Связь с «{title}» слабая — карточку оставили для проверки"
+                        )
                     used_buildings.add(bkey)
                     await asyncio.sleep(0.05)
 
                 await asyncio.sleep(0.05)
 
             if len(found) < target_count:
-                await progress(
-                    f"Строго по зданиям: принято {len(found)} из {target_count}. "
-                    f"Добор «любыми компаниями» отключён."
-                )
+                if sphere0 in _COMPANY_ADDRESS_FALLBACK_SPHERES:
+                    await progress(
+                        f"Картами найдено мало объектов: {len(found)} из {target_count}. "
+                        f"Пробуем добор по действующим компаниям с адресом…"
+                    )
+                    for query in jobs:
+                        if len(found) >= target_count:
+                            break
+                        try:
+                            suggestions = await dadata.suggest(
+                                query,
+                                count=min(20, max(6, target_count * 4)),
+                                okved=prefixes,
+                                locations=locations,
+                            )
+                        except Exception as exc:
+                            log.exception("fallback dadata failed for %s", query)
+                            errors.append(f"добор {query}: {exc}")
+                            suggestions = []
+                        for item in suggestions:
+                            if len(found) >= target_count:
+                                break
+                            party_probe = enrich_from_dadata(item)
+                            addr = str(party_probe.get("address") or "")
+                            if not streetish_address(addr):
+                                continue
+                            before = len(found)
+                            ok = await take(
+                                item,
+                                found_via=f"{query} · юрадрес",
+                                soft=True,
+                                from_building=True,
+                            )
+                            if not ok or len(found) <= before:
+                                continue
+                            picked = found[-1]
+                            title = short_company_label(str(picked.get("name") or "")) or query
+                            pin = f"{title} {addr}".strip()
+                            picked["object_address"] = addr
+                            picked["object"] = {
+                                "title": title,
+                                "address": addr,
+                                "source": "dadata_legal_address_fallback",
+                                "url_2gis": "",
+                                "url_osm": "",
+                                "maps_yandex": f"https://yandex.ru/maps/?text={quote_plus(pin)}",
+                                "maps_google": (
+                                    "https://www.google.com/maps/search/?api=1&query="
+                                    + quote_plus(pin)
+                                ),
+                                "recommend": {
+                                    "ok": True,
+                                    "score": 45,
+                                    "reason": "карты не нашли отдельный объект; взят адрес действующей компании",
+                                    "status": "перепроверить",
+                                },
+                                "relation": {
+                                    "status": "адрес компании как объект-кандидат",
+                                    "confidence": 35,
+                                    "role": "компания/оператор; здание нужно проверить по карте",
+                                    "reason": "fallback по DaData после пустого поиска объектов на картах",
+                                    "soft": True,
+                                    "found_via": "dadata",
+                                    "found_query": query,
+                                },
+                                "photo_notes": [
+                                    "фото фасада не подтверждено: объект взят по юридическому адресу",
+                                ],
+                                "verified": False,
+                            }
+                            picked["photos"] = []
+
+                if len(found) < target_count:
+                    await progress(
+                        f"Строго по зданиям: принято {len(found)} из {target_count}. "
+                        f"Добор «любыми компаниями» отключён."
+                    )
+                else:
+                    await progress(
+                        f"Добор по адресам дал {len(found)} карточку(и); "
+                        f"они помечены как требующие проверки здания."
+                    )
         finally:
             await http.aclose()
 
@@ -688,38 +1106,208 @@ async def run_hunt(
 
         verified: list[dict[str, Any]] = []
         for i, party in enumerate(found, start=1):
+            if len(verified) >= target_count:
+                break
             inn = party["inn"]
+            object_only = str(inn).startswith("OBJ-") or bool(
+                (party.get("payload") or {}).get("object_only")
+                if isinstance(party.get("payload"), dict)
+                else False
+            )
             obj0 = party.get("object") if isinstance(party.get("object"), dict) else {}
             rel0 = obj0.get("relation") if isinstance(obj0, dict) else {}
-            if not obj0 or not relation_accepted(
-                rel0 if isinstance(rel0, dict) else {},
-                min_score=MIN_RELATION_CONFIDENCE,
-            ):
+            if not obj0:
                 dropped += 1
                 await progress(
-                    f"Пропуск ИНН {inn}: нет подтверждённого здания/связи — "
-                    f"в контакты не идём"
+                    f"Пропуск {inn}: нет данных здания — карточку собрать нельзя"
                 )
                 continue
-            await progress(f"Агент 2: выписка {i} из {len(found)} — ИНН {inn}")
-            try:
-                raw = await dadata.find_by_inn(inn)
-            except Exception as exc:
-                log.exception("DaData findById failed for %s", inn)
-                errors.append(f"выписка {inn}: {exc}")
-                dropped += 1
-                await db.update_company(
-                    database, inn, {"stamp": "осторожно", "score": 40}
+            if not relation_usable(
+                rel0 if isinstance(rel0, dict) else {},
+                min_score=MIN_RELATION_CONFIDENCE,
+                allow_source=True,
+            ):
+                rel0 = {
+                    **(rel0 if isinstance(rel0, dict) else {}),
+                    "status": "связь требует проверки",
+                    "confidence": int((rel0 or {}).get("confidence") or 20) if isinstance(rel0, dict) else 20,
+                    "soft": True,
+                }
+                obj0["relation"] = rel0
+                party["object"] = obj0
+            if object_only:
+                await progress(
+                    f"Агент 2: добираем собственника для объекта — {obj0.get('title') or inn}"
                 )
-                party["stamp"] = "осторожно"
-                party["score"] = 40
-                verified.append(party)
-                continue
-            if not raw:
-                dropped += 1
-                await db.update_company(database, inn, {"stamp": "стоп", "score": 0})
-                continue
-            flat = enrich_from_dadata(raw)
+                city_q = str(obj0.get("city") or "").strip() or (
+                    sel_cities[0] if sel_cities else ""
+                )
+                owner_cands: list[dict[str, Any]] = []
+                try:
+                    async with httpx.AsyncClient(
+                        timeout=18.0,
+                        follow_redirects=True,
+                        headers={
+                            "User-Agent": (
+                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/120.0.0.0 Safari/537.36"
+                            ),
+                            "Accept-Language": "ru-RU,ru;q=0.9",
+                        },
+                    ) as owner_http:
+                        owner_cands = await asyncio.wait_for(
+                            resolve_building_owners(
+                                http=owner_http,
+                                dadata=dadata,
+                                obj={**obj0, "city": city_q},
+                                locations=locations,
+                                city=city_q,
+                                llm=llm,
+                            ),
+                            timeout=12.0 if cheap_mode else 55.0,
+                        )
+                except asyncio.TimeoutError:
+                    log.warning("oneshot owner resolver timeout for %s", obj0.get("title") or inn)
+                    errors.append(f"owners timeout {obj0.get('title') or inn}")
+                except Exception as exc:
+                    log.exception("oneshot owner resolver failed for %s", obj0.get("title") or inn)
+                    errors.append(f"owners {obj0.get('title') or inn}: {exc}")
+                if owner_cands:
+                    party["owner_candidates"] = owner_cands
+                    await progress(
+                        f"Собственник «{obj0.get('title') or inn}»: "
+                        f"{candidate_sources_summary(owner_cands)}"
+                    )
+                if not owner_cands:
+                    title_q = str(obj0.get("title") or "").strip()
+                    city_q = str(obj0.get("city") or "").strip() or (
+                        sel_cities[0] if sel_cities else ""
+                    )
+                    dadata_queries = [
+                        f"{title_q} {city_q}".strip(),
+                        title_q,
+                    ]
+                    seen_suggest_inn: set[str] = set()
+                    for dq in [q for q in dadata_queries if q]:
+                        try:
+                            suggestions = await dadata.suggest(
+                                dq,
+                                count=8,
+                                locations=locations,
+                            )
+                        except Exception as exc:
+                            log.info("object-only dadata suggest failed %s: %s", dq, exc)
+                            continue
+                        for suggest in suggestions:
+                            probe = enrich_from_dadata(suggest)
+                            sug_inn = str(probe.get("inn") or "").strip()
+                            if not sug_inn or sug_inn in seen_suggest_inn:
+                                continue
+                            seen_suggest_inn.add(sug_inn)
+                            rel_probe = object_company_relation(probe, obj0)
+                            rel_conf = int((rel_probe or {}).get("confidence") or 0)
+                            if rel_conf < 35:
+                                continue
+                            owner_cands.append(
+                                {
+                                    "inn": sug_inn,
+                                    "suggest": suggest,
+                                    "source": "dadata-object-title",
+                                    "query": dq,
+                                    "resolver_score": rel_conf,
+                                    "resolver_reasons": [
+                                        f"DaData suggest по названию объекта: {dq}",
+                                        str((rel_probe or {}).get("reason") or ""),
+                                    ],
+                                    "party": {
+                                        "name": probe.get("name"),
+                                        "address": probe.get("address"),
+                                        "okved": probe.get("okved"),
+                                    },
+                                }
+                            )
+                        if owner_cands:
+                            party["owner_candidates"] = owner_cands
+                            await progress(
+                                f"Собственник «{title_q or inn}» через DaData: "
+                                f"{candidate_sources_summary(owner_cands)}"
+                            )
+                            break
+                for cand in owner_cands:
+                    suggest = cand.get("suggest")
+                    if not suggest:
+                        continue
+                    probe = candidate_party(cand) or enrich_from_dadata(suggest)
+                    if not str(probe.get("inn") or "").strip():
+                        continue
+                    cand["party"] = {
+                        "name": probe.get("name"),
+                        "address": probe.get("address"),
+                        "okved": probe.get("okved"),
+                    }
+                    rel_probe = object_company_relation(probe, obj0)
+                    resolver_score = int(cand.get("resolver_score") or 0)
+                    if relation_usable(rel_probe, allow_source=True) or resolver_score >= MIN_RELATION_CONFIDENCE:
+                        probe["object"] = {
+                            **obj0,
+                            "relation": (
+                                rel_probe
+                                if relation_usable(rel_probe, allow_source=True)
+                                else {
+                                    "status": "найден в источниках",
+                                    "confidence": min(max(resolver_score, 50), 80),
+                                    "source": cand.get("source") or "",
+                                    "soft": True,
+                                }
+                            ),
+                        }
+                        probe["photos"] = party.get("photos") or []
+                        probe["object_address"] = party.get("object_address") or obj0.get("address") or ""
+                        probe["owner_candidates"] = owner_cands
+                        probe["sphere"] = party.get("sphere") or ""
+                        probe["idea"] = party.get("idea") or ""
+                        probe["found_via"] = party.get("found_via") or "oneshot owner resolver"
+                        party = {**party, **probe}
+                        inn = str(party.get("inn") or inn)
+                        object_only = str(inn).startswith("OBJ-") or not bool(inn)
+                        obj0 = party.get("object") if isinstance(party.get("object"), dict) else obj0
+                        break
+            if object_only:
+                await progress(f"Агент 2: карточка объекта без ИНН — {obj0.get('title') or inn}")
+                flat = {
+                    **party,
+                    "management_label": "ЛПР не найден",
+                    "management_post": "Нужно определить владельца/оператора",
+                    "payload": {
+                        **(party.get("payload") or {}),
+                        "object_only": True,
+                        "real_inn_missing": True,
+                    },
+                }
+            else:
+                await progress(f"Агент 2: выписка {i} из {len(found)} — ИНН {inn}")
+                try:
+                    raw = await dadata.find_by_inn(inn)
+                except Exception as exc:
+                    log.exception("DaData findById failed for %s", inn)
+                    errors.append(f"выписка {inn}: {exc}")
+                    flat = {
+                        **party,
+                        "stamp": "осторожно",
+                        "score": 40,
+                        "stamp_hint": "DaData не отдала выписку; карточка оставлена для ручной проверки",
+                    }
+                else:
+                    if raw:
+                        flat = enrich_from_dadata(raw)
+                    else:
+                        flat = {
+                            **party,
+                            "stamp": "осторожно",
+                            "score": 40,
+                            "stamp_hint": "Выписка по ИНН не найдена; карточка оставлена для ручной проверки",
+                        }
             flat["search_phrase"] = phrase.strip() or party.get("found_via") or ""
             flat["requested_city"] = city_store or geo_label
             flat["geo_note"] = party.get("geo_note") or ""
@@ -769,14 +1357,15 @@ async def run_hunt(
                         flat["photos"] = more_photos
                         obj_meta["photo_notes"] = more_notes
                         flat["object"] = obj_meta
-            flat = await merge_fns_finance(flat, fns)
+            if not object_only:
+                flat = await merge_fns_finance(flat, fns)
             await progress(
-                f"Агент 2+3: контакты и LLM-проверка — ИНН {inn}"
+                f"Агент 2+3: контакты и проверка — {'объект без ИНН' if object_only else 'ИНН ' + inn}"
             )
             try:
                 flat = await asyncio.wait_for(
                     enrich_contacts(flat, llm=llm),
-                    timeout=90.0,
+                    timeout=35.0 if object_only else 90.0,
                 )
             except asyncio.TimeoutError:
                 log.warning("enrich_contacts timeout for %s", inn)
@@ -815,7 +1404,7 @@ async def run_hunt(
             # KP is a separate later step — do not auto-compose during hunt
             flat["kp"] = {}
             flat["kp_status"] = "отложено"
-            if qualification.get("non_object_legal_entity"):
+            if qualification.get("non_object_legal_entity") and not object_only:
                 presence = flat.get("presence") or {}
                 checks = list(presence.get("checks") or [])
                 checks.append("Объект: фото скрыты, потому что юрлицо не подтверждено как владелец/оператор здания")
@@ -853,8 +1442,115 @@ async def run_hunt(
                 object_confirmed=bool(qualification.get("object_confirmed")),
                 non_object_legal_entity=bool(qualification.get("non_object_legal_entity")),
             )
-            if stamp == "стоп":
-                dropped += 1
+            flat["stamp"] = stamp
+            flat["score"] = score
+            flat["stamp_hint"] = stamp_hint
+            flat["owner_candidates"] = party.get("owner_candidates") or flat.get(
+                "owner_candidates"
+            ) or []
+            if object_only:
+                presence = flat.get("presence") if isinstance(flat.get("presence"), dict) else {}
+                checks = list(presence.get("checks") or [])
+                checks.append("Карточка сохранена без подтверждённого ИНН: нужно проверить владельца/оператора")
+                presence["checks"] = checks
+                flat["presence"] = presence
+                flat["card_audit"] = {
+                    "verdict": "warn",
+                    "reason": "Здание найдено, но владелец/оператор не подтверждён в быстрых источниках",
+                    "keep_card": True,
+                }
+            else:
+                await progress(f"LLM-аудит карточки — ИНН {inn}")
+
+            async def _ensure_owner_candidates() -> list[dict[str, Any]]:
+                obj = flat.get("object") if isinstance(flat.get("object"), dict) else {}
+                if not obj.get("title"):
+                    return list(flat.get("owner_candidates") or [])
+                city_q = (
+                    str(obj.get("city") or "").strip()
+                    or (sel_cities[0] if sel_cities else "")
+                    or city_store
+                    or ""
+                )
+                async with httpx.AsyncClient(
+                    timeout=20.0,
+                    follow_redirects=True,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (compatible; NiteosHunt/1.0; +https://niteos.local)"
+                        )
+                    },
+                ) as refresh_http:
+                    return await resolve_building_owners(
+                        http=refresh_http,
+                        dadata=dadata,
+                        obj=obj,
+                        locations=locations,
+                        city=city_q,
+                        llm=None,
+                    )
+
+            if object_only:
+                audit = flat["card_audit"]
+            else:
+                try:
+                    audit = await asyncio.wait_for(
+                        run_final_card_audit(
+                            llm,
+                            flat,
+                            query=phrase.strip() or party.get("found_via") or "",
+                            city=city_store or geo_label,
+                            dadata=dadata,
+                            fns=fns,
+                            candidates=flat.get("owner_candidates") or [],
+                            ensure_candidates=_ensure_owner_candidates,
+                        ),
+                        timeout=55.0,
+                    )
+                except asyncio.TimeoutError:
+                    log.warning("card audit timeout for %s", inn)
+                    audit = None
+                except Exception as exc:
+                    log.exception("card audit failed for %s", inn)
+                    errors.append(f"llm-аудит {inn}: {exc}")
+                    audit = None
+            if audit:
+                inn = str(flat.get("inn") or inn)
+                # Re-qualify after possible INN swap / contact clears.
+                qualification = qualify_lead(flat)
+                flat["qualification"] = qualification
+                if audit.get("verdict") == "accept" and not audit.get("swapped"):
+                    score, stamp, stamp_hint = _score(
+                        party.get("sphere") or flat.get("sphere") or "",
+                        flat.get("status") or "",
+                        bool(flat.get("management")),
+                        online_hits=int(flat.get("online_hits") or 0),
+                        has_finance=flat.get("revenue") is not None
+                        or flat.get("profit") is not None,
+                        object_confirmed=bool(qualification.get("object_confirmed")),
+                        non_object_legal_entity=bool(
+                            qualification.get("non_object_legal_entity")
+                        ),
+                    )
+                    flat["stamp"] = stamp
+                    flat["score"] = score
+                    flat["stamp_hint"] = stamp_hint or flat.get("stamp_hint") or ""
+                else:
+                    # warn / swap: keep audit stamp (осторожно), never стоп
+                    stamp = str(flat.get("stamp") or "осторожно")
+                    if stamp == "стоп":
+                        stamp = "осторожно"
+                        flat["stamp"] = stamp
+                    try:
+                        score = int(flat.get("score") or score)
+                    except (TypeError, ValueError):
+                        pass
+                    stamp_hint = str(flat.get("stamp_hint") or stamp_hint)
+                await progress(
+                    f"LLM-аудит ИНН {inn}: {audit.get('verdict')}"
+                    f"{' · замена юрлица' if audit.get('swapped') else ''} — "
+                    f"{str(audit.get('reason') or '')[:160]}"
+                )
             await db.update_company(
                 database,
                 inn,
@@ -885,6 +1581,7 @@ async def run_hunt(
                             "emails": flat.get("emails") or [],
                             "sites": flat.get("sites") or [],
                             "photos": flat.get("photos") or [],
+                            "people_contacts": flat.get("people_contacts") or [],
                             "contact_routes": flat.get("contact_routes") or [],
                             "presence": flat.get("presence") or {},
                             "kp": flat.get("kp") or {},
@@ -904,6 +1601,7 @@ async def run_hunt(
                             "assets": flat.get("assets"),
                             "finance_year": flat.get("finance_year"),
                             "finance_source": flat.get("finance_source"),
+                            "card_audit": flat.get("card_audit") or {},
                         },
                         ensure_ascii=False,
                     ),
@@ -913,13 +1611,67 @@ async def run_hunt(
             party["stamp"] = stamp
             party["score"] = score
             party["stamp_hint"] = stamp_hint
-            if stamp != "стоп":
-                verified.append(party)
+            # Always keep audited cards in the result set (fix/warn, never drop).
+            if len(verified) < target_count and str(party.get("inn") or "").strip():
+                if str(party.get("stamp") or "") == "стоп" and party.get("card_audit"):
+                    party["stamp"] = "осторожно"
+                    party["stamp_hint"] = (
+                        party.get("stamp_hint")
+                        or "LLM-аудит: карточку оставили для ручной сверки"
+                    )
+                if str(party.get("stamp") or "") != "стоп":
+                    verified.append(party)
+                else:
+                    dropped += 1
             await asyncio.sleep(0.08)
 
         def company_card(c: dict[str, Any]) -> dict[str, Any]:
             year = c.get("finance_year")
-            presence = c.get("presence") or {}
+            raw_presence = c.get("presence") or {}
+            presence = dict(raw_presence) if isinstance(raw_presence, dict) else {}
+            audit = c.get("card_audit") if isinstance(c.get("card_audit"), dict) else {}
+            contacts_untrusted = audit.get("contacts_ok") is False
+            object_phone_sources = [
+                src
+                for src in (presence.get("phone_sources") or c.get("phone_sources") or [])
+                if isinstance(src, dict)
+                and "сайт объекта" in str(src.get("source") or "").lower()
+            ]
+            if contacts_untrusted:
+                for key in (
+                    "site",
+                    "phone",
+                    "email",
+                    "vk_company",
+                    "vk_group",
+                    "telegram",
+                    "whatsapp",
+                    "max",
+                    "web_lpr",
+                ):
+                    item = presence.get(key)
+                    if not isinstance(item, dict):
+                        continue
+                    status = str(item.get("status") or "").lower()
+                    if status == "контакт объекта" and key in {"site", "phone"}:
+                        continue
+                    if key == "phone" and object_phone_sources:
+                        continue
+                    presence[key] = {
+                        "status": "перепроверить",
+                        "value": "",
+                        "hint": "финальный аудит не подтвердил этот контакт",
+                    }
+                presence["phone_sources"] = object_phone_sources
+            phones_out = c.get("phones") or []
+            emails_out = c.get("emails") or []
+            sites_out = c.get("sites") or []
+            if contacts_untrusted:
+                phone_item = presence.get("phone") if isinstance(presence.get("phone"), dict) else {}
+                site_item = presence.get("site") if isinstance(presence.get("site"), dict) else {}
+                phones_out = [phone_item.get("value")] if phone_item.get("value") else []
+                sites_out = [site_item.get("value")] if site_item.get("value") else []
+                emails_out = []
             return {
                 "inn": c.get("inn"),
                 "name": c.get("name"),
@@ -937,8 +1689,9 @@ async def run_hunt(
                 "phone_sources": (presence.get("phone_sources") if isinstance(presence, dict) else None)
                 or c.get("phone_sources")
                 or [],
-                "emails": c.get("emails") or [],
-                "sites": c.get("sites") or [],
+                "emails": emails_out,
+                "sites": sites_out,
+                "people_contacts": c.get("people_contacts") or [],
                 "contact_routes": c.get("contact_routes") or [],
                 "presence": presence,
                 "checks": (presence.get("checks") if isinstance(presence, dict) else None) or [],
@@ -968,7 +1721,10 @@ async def run_hunt(
                 "kp_status": c.get("kp_status") or "отложено",
                 "object": c.get("object") or {},
                 "object_address": c.get("object_address") or "",
+                "owner_candidates": c.get("owner_candidates") or [],
+                "lighting": lighting_score(c),
                 "qualification": c.get("qualification") or {},
+                "card_audit": audit,
             }
 
         payload = {

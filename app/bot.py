@@ -102,6 +102,10 @@ async def build_dispatcher(settings: Settings, database) -> Dispatcher:
     dp["settings"] = settings
     dp["database"] = database
     dp.message.middleware(TeamOnlyMiddleware())
+    if getattr(router, "parent_router", None) is not None:
+        # aiogram keeps parent on a Router after polling stops; resilient restarts
+        # need to attach the same declared handlers to a fresh Dispatcher.
+        setattr(router, "_parent_router", None)
     dp.include_router(router)
     return dp
 

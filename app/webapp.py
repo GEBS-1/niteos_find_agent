@@ -25,7 +25,7 @@ from app.share_auth import (
     verify_session,
     session_secret,
 )
-from app.spheres import SPHERES
+from app.spheres import BUILDING_SPHERE_IDS, building_spheres
 from app.telegram_web import parse_init_data
 
 log = logging.getLogger(__name__)
@@ -131,7 +131,7 @@ async def meta(request: web.Request) -> web.Response:
                         for o in s.options
                     ],
                 }
-                for s in SPHERES.values()
+                for s in building_spheres()
             ],
             "counts": [1, 5, 10, 20, 50] if ctx.get("role") != "guest" else [1, 5],
         }
@@ -314,19 +314,26 @@ async def create_hunt(request: web.Request) -> web.Response:
     city_store = ", ".join(sel_cities)
     region_store = ", ".join(sel_regions)
     try:
-        count = int(body.get("count") or 10)
+        count = int(body.get("count") or 1)
     except (TypeError, ValueError) as exc:
         raise web.HTTPBadRequest(text="count") from exc
     if ctx.get("role") == "guest":
         count = max(1, min(count, 5))
     else:
         count = max(1, min(count, 50))
-    sphere_ids = [str(s) for s in (body.get("spheres") or []) if str(s)]
+    sphere_ids = [
+        str(s)
+        for s in (body.get("spheres") or [])
+        if str(s) in set(BUILDING_SPHERE_IDS)
+    ]
     search_queries = body.get("search_queries") or body.get("queries") or []
     if isinstance(search_queries, str):
         search_queries = [q.strip() for q in search_queries.split(",") if q.strip()]
     else:
         search_queries = [str(q).strip() for q in search_queries if str(q).strip()]
+    allowed_queries = {o.query for s in building_spheres() for o in s.options}
+    if not phrase:
+        search_queries = [q for q in search_queries if q in allowed_queries]
     if not phrase and not okved_raw and not sphere_ids and not search_queries:
         raise web.HTTPBadRequest(text="Нужен запрос, сфера или ОКВЭД")
 

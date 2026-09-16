@@ -28,6 +28,19 @@ async def _bootstrap_webapp_url() -> str:
     return url
 
 
+async def _run_resilient(name: str, factory, *, delay: float = 10.0) -> None:
+    while True:
+        try:
+            await factory()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("%s failed; restarting in %.0fs", name, delay)
+        else:
+            log.warning("%s stopped; restarting in %.0fs", name, delay)
+        await asyncio.sleep(delay)
+
+
 async def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -57,13 +70,19 @@ async def main() -> None:
         except Exception:
             log.exception("boot webapp publish failed")
 
+    tasks = [
+        asyncio.create_task(
+            _run_resilient("telegram polling", lambda: run_polling(settings, database, bot=bot))
+        ),
+        asyncio.create_task(_run_resilient("hunt worker", lambda: worker(runtime))),
+        asyncio.create_task(_run_resilient("public url watcher", lambda: watch_public_url(bot, settings))),
+    ]
     try:
-        await asyncio.gather(
-            run_polling(settings, database, bot=bot),
-            worker(runtime),
-            watch_public_url(bot, settings),
-        )
+        await asyncio.gather(*tasks)
     finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await runner.cleanup()
         await database.close()
         await bot.session.close()

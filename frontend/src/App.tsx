@@ -11,6 +11,7 @@ import {
   History,
   Link2,
   LockKeyhole,
+  Mail,
   MapPin,
   Menu,
   Minus,
@@ -48,8 +49,11 @@ import { cn } from "@/lib/utils";
 
 type Screen = "setup" | "search" | "results" | "saved";
 
+const DEFAULT_CITY = "Казань";
+
 type LeadView = {
   key: string;
+  saveId: string;
   inn: string;
   name: string;
   address: string;
@@ -60,13 +64,46 @@ type LeadView = {
   revenue: string;
   profit: string;
   expense: string;
+  financeYear?: string;
+  founders?: string[];
+  people?: Array<{
+    name: string;
+    role: string;
+    phone?: string;
+    email?: string;
+    vk?: string;
+    telegram?: string;
+    whatsapp?: string;
+    why?: string;
+  }>;
   image: string;
   status: string;
   tone: "good" | "warn" | "bad";
   site?: string;
+  email?: string;
+  vkChannel?: string;
   vkLpr?: string;
+  vkRecheck?: boolean;
+  messenger?: string;
+  companyPhone?: string;
+  companyEmail?: string;
+  companyMessenger?: string;
+  companyVk?: string;
   maps?: string;
   hint?: string;
+  auditLabel?: string;
+  personalContactOk: boolean;
+  relationLabel?: string;
+  contactNote?: string;
+  photoStatus?: string;
+  lightingLabel?: string;
+  ownerCandidates?: Array<{
+    name: string;
+    inn: string;
+    source: string;
+    score: number;
+  }>;
+  hasRealPhoto: boolean;
 };
 
 function presenceValue(c: Company, key: string): string {
@@ -78,8 +115,28 @@ function normalizePhoto(url: string): string {
   return String(url || "").replace(/\/(%s?|\{s\}|\{size\})$/i, "/orig");
 }
 
+function photoLooksUsable(url: string): boolean {
+  const low = String(url || "").toLowerCase();
+  if (!/^https?:\/\//i.test(url)) return false;
+  return ![
+    "default-share",
+    "favicon",
+    "sprite",
+    "1x1",
+    "pixel",
+    "placeholder",
+    "ytimg",
+    "youtube",
+    "selstorage",
+    "porn",
+    "porno",
+    "xxx",
+  ].some((marker) => low.includes(marker));
+}
+
 export function companyToLead(c: Company, index: number): LeadView {
   const obj = c.object || {};
+  const innValue = String(c.inn || "").startsWith("OBJ-") ? "" : String(c.inn || "");
   const stampRaw = String(c.stamp || c.stamp_label || "").toLowerCase();
   const tone: LeadView["tone"] = /стоп|отказ|плох/.test(stampRaw)
     ? "bad"
@@ -93,36 +150,148 @@ export function companyToLead(c: Company, index: number): LeadView {
       : []
   )
     .map(normalizePhoto)
-    .filter((u) => /^https?:\/\//i.test(u));
+    .filter(photoLooksUsable);
+  const realPhoto = photos[0] || "";
   const phone =
     presenceValue(c, "phone") ||
     String(c.presence?.recommend?.value || "").replace(/^.*?(\+?\d[\d\s\-()]{8,}).*$/, "$1").trim();
   const recPhone = /^\+?\d/.test(phone) ? phone : presenceValue(c, "phone");
+  const audit = c.card_audit;
+  const auditVerdict = String(audit?.verdict || c.object?.relation?.llm_audit || "").toLowerCase();
+  const auditReason = String(audit?.reason || c.object?.relation?.llm_reason || c.stamp_hint || "").trim();
+  let auditLabel: string | undefined;
+  if (auditVerdict === "accept") {
+    auditLabel = audit?.swapped
+      ? `Проверено LLM · заменён ИНН${audit.use_inn ? ` → ${audit.use_inn}` : ""}`
+      : "Проверено LLM";
+  } else if (auditVerdict === "warn" || auditVerdict === "reject" || /осторож/.test(stampRaw)) {
+    auditLabel = audit?.swapped
+      ? `LLM заменил ИНН · перепроверить`
+      : auditReason
+        ? `LLM · перепроверить: ${auditReason.slice(0, 120)}`
+        : "LLM · перепроверить";
+  }
+
+  const site =
+    presenceValue(c, "site") ||
+    (Array.isArray(c.sites) ? String(c.sites[0] || "").trim() : "") ||
+    undefined;
+  const email =
+    presenceValue(c, "email") ||
+    (Array.isArray(c.emails) ? String(c.emails[0] || "").trim() : "") ||
+    undefined;
+  const vkChannel =
+    presenceValue(c, "vk_company") ||
+    presenceValue(c, "vk_group") ||
+    undefined;
+  const messenger =
+    presenceValue(c, "telegram") ||
+    presenceValue(c, "whatsapp") ||
+    presenceValue(c, "max") ||
+    undefined;
+  const relation = obj.relation || {};
+  const siteStatus = String(c.presence?.site?.status || "").trim();
+  const siteHint = String(c.presence?.site?.hint || "").trim();
+  const phoneSources = Array.isArray(c.presence?.phone_sources)
+    ? (c.presence?.phone_sources as Array<{ value?: string; source?: string }>)
+    : [];
+  const contactNote = [
+    siteStatus === "контакт объекта" ? "Сайт найден по зданию" : "",
+    phoneSources.some((x) => String(x.source || "").includes("сайт объекта")) ? "Телефон с сайта объекта" : "",
+    siteHint,
+  ].filter(Boolean).join(" · ") || undefined;
+  const relationLabel = relation.status
+    ? `${relation.status}${relation.confidence ? ` · ${relation.confidence}/99` : ""}`
+    : undefined;
+
+  const peopleRaw = Array.isArray(c.people_contacts)
+    ? c.people_contacts
+    : Array.isArray(c.presence?.people?.value)
+      ? (c.presence?.people?.value as Array<Record<string, string>>)
+      : [];
+  const people = peopleRaw
+    .map((p) => ({
+      name: String(p?.name || "").trim(),
+      role: String(p?.role || "").trim() || "контакт",
+      phone: String(p?.phone || "").trim() || undefined,
+      email: String(p?.email || "").trim() || undefined,
+      vk: String(p?.vk || "").trim() || undefined,
+      telegram: String(p?.telegram || "").trim() || undefined,
+      whatsapp: String(p?.whatsapp || "").trim() || undefined,
+      why: String(p?.why || "").trim() || undefined,
+    }))
+    .filter((p) => p.name)
+    .slice(0, 5);
+  const actionablePerson = people.find((p) => p.phone || p.email || p.vk || p.telegram || p.whatsapp);
+  const personalContactOk = Boolean(actionablePerson);
+  const personalMessenger = actionablePerson?.telegram || actionablePerson?.whatsapp || "";
+  const personalPhone = actionablePerson?.phone || "";
+  const personalEmail = actionablePerson?.email || "";
+  const personalVk = actionablePerson?.vk || presenceValue(c, "vk_lpr") || "";
+  const founders = (Array.isArray(c.founders) ? c.founders : [])
+    .map((f) => String(f || "").trim())
+    .filter(Boolean)
+    .slice(0, 4);
+  const lightingScore = Number(c.lighting?.score || 0);
+  const lightingLabel = lightingScore
+    ? `Подсветка: ${lightingScore}/100${c.lighting?.reasons?.length ? ` · ${c.lighting.reasons.slice(0, 2).join(" · ")}` : ""}`
+    : undefined;
+  const ownerCandidates = (Array.isArray(c.owner_candidates) ? c.owner_candidates : [])
+    .map((row) => ({
+      name: String(row?.party?.name || "").trim(),
+      inn: String(row?.inn || "").trim(),
+      source: String(row?.source || "").trim(),
+      score: Number(row?.resolver_score || 0),
+    }))
+    .filter((row) => row.name || row.inn)
+    .slice(0, 3);
+
   return {
     key: c.inn || `lead-${index}`,
-    inn: c.inn || "",
+    saveId: String(c.inn || ""),
+    inn: innValue,
     name: obj.title || c.name || "Объект",
     address: obj.address || c.object_address || c.address || "Адрес уточняется",
     company: c.name || "—",
-    person: c.management_label || c.management || "Директор не найден",
-    role: c.management_post || "ЛПР / директор",
-    phone: recPhone || "нет телефона",
+    person: actionablePerson?.name || "Личный контакт владельца/ЛПР не найден",
+    role: actionablePerson?.role || (people.length ? "ФИО есть, личный канал не подтверждён" : "нужно выйти на собственника/эксплуатанта"),
+    phone: personalPhone || "личный телефон не найден",
     revenue: c.revenue_text || "—",
     profit: c.profit_text || "—",
     expense: c.expense_text || "—",
-    image: photos[0] || fallbackOmega,
+    financeYear: c.finance_year || undefined,
+    founders: founders.length ? founders : undefined,
+    people: people.length ? people : undefined,
+    image: realPhoto || fallbackOmega,
     status: c.stamp_label || `${c.stamp || "лид"} · ${c.score ?? "—"}/99`,
     tone,
-    site: presenceValue(c, "site") || undefined,
-    vkLpr: presenceValue(c, "vk_lpr") || undefined,
+    site: site || undefined,
+    email: personalEmail || undefined,
+    vkChannel: vkChannel || undefined,
+    vkLpr: personalVk || undefined,
+    vkRecheck: String(c.presence?.vk_lpr?.status || "").toLowerCase().includes("перепров"),
+    messenger: personalMessenger || undefined,
+    companyPhone: recPhone || undefined,
+    companyEmail: email || undefined,
+    companyMessenger: messenger || undefined,
+    companyVk: vkChannel || undefined,
     maps: obj.maps_yandex,
     hint: c.stamp_hint,
+    auditLabel,
+    personalContactOk,
+    relationLabel,
+    contactNote,
+    photoStatus: realPhoto ? "Фото фасада найдено" : "Фото фасада не найдено",
+    lightingLabel,
+    ownerCandidates: ownerCandidates.length ? ownerCandidates : undefined,
+    hasRealPhoto: Boolean(realPhoto),
   };
 }
 
 function kpToLead(it: KpItem, index: number): LeadView {
   return {
     key: it.inn || `kp-${index}`,
+    saveId: it.inn || "",
     inn: it.inn || "",
     name: it.object_title || it.name || "Объект",
     address: it.object_address || it.address || "",
@@ -135,7 +304,10 @@ function kpToLead(it: KpItem, index: number): LeadView {
     expense: "—",
     image: (it.photos || [])[0] || fallbackOmega,
     status: "В КП",
-    tone: "good",
+    tone: "good" as const,
+    personalContactOk: true,
+    vkRecheck: false,
+    auditLabel: undefined,
   };
 }
 
@@ -261,7 +433,7 @@ export default function App() {
             role={role}
             onStart={async (payload) => {
               setScreen("search");
-              setHunt({ status: "queued", progress: "В очереди…", companies: [], target_count: Number(payload.count) || 10 });
+              setHunt({ status: "queued", progress: "В очереди…", companies: [], target_count: Number(payload.count) || 1 });
               try {
                 const started = await startHunt(payload);
                 const id = started.id;
@@ -449,9 +621,9 @@ function SetupScreen({
   onStart: (payload: Record<string, unknown>) => Promise<void>;
 }) {
   const counts = meta.counts?.length ? meta.counts : [1, 5, 10];
-  const [count, setCount] = useState(counts.includes(10) ? 10 : counts[0]);
-  const [geoAll, setGeoAll] = useState(true);
-  const [cities, setCities] = useState<string[]>([]);
+  const [count, setCount] = useState(counts.includes(1) ? 1 : counts[0]);
+  const [geoAll, setGeoAll] = useState(false);
+  const [cities, setCities] = useState<string[]>([DEFAULT_CITY]);
   const [regions, setRegions] = useState<string[]>([]);
   const [geoQ, setGeoQ] = useState("");
   const [openSphere, setOpenSphere] = useState<string | null>(meta.spheres[0]?.id || null);
@@ -483,6 +655,24 @@ function SetupScreen({
 
   const start = async () => {
     setErr("");
+    const typedGeo = geoQ.trim();
+    const typedKnown = flat.find((item) =>
+      item.title.toLowerCase() === typedGeo.toLowerCase()
+      || String(item.label || "").toLowerCase() === typedGeo.toLowerCase(),
+    );
+    const effectiveCities = geoAll
+      ? (typedGeo && typedKnown?.kind !== "region" ? [typedKnown?.title || typedGeo] : [])
+      : [...new Set([
+        ...cities,
+        ...(typedGeo && typedKnown?.kind !== "region" ? [typedKnown?.title || typedGeo] : []),
+      ])];
+    const effectiveRegions = geoAll
+      ? (typedGeo && typedKnown?.kind === "region" ? [typedKnown.dadata_region || typedKnown.title] : [])
+      : [...new Set([
+        ...regions,
+        ...(typedGeo && typedKnown?.kind === "region" ? [typedKnown.dadata_region || typedKnown.title] : []),
+      ])];
+    const effectiveGeoAll = geoAll && !effectiveCities.length && !effectiveRegions.length;
     const spheres = Object.keys(selected).filter((id) => (selected[id]?.size || 0) > 0);
     const search_queries: string[] = [];
     for (const s of meta.spheres) {
@@ -501,8 +691,8 @@ function SetupScreen({
         count,
         spheres,
         search_queries,
-        cities: geoAll ? [] : cities,
-        regions: geoAll ? [] : regions,
+        cities: effectiveGeoAll ? [] : effectiveCities,
+        regions: effectiveGeoAll ? [] : effectiveRegions,
       });
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -517,7 +707,7 @@ function SetupScreen({
         <section className="panel p-5 sm:p-7">
           <h2 className="mb-5 font-display text-lg font-semibold">География</h2>
           <div className="mb-4 flex flex-wrap gap-2">
-            <Button size="sm" variant={geoAll ? "default" : "outline"} onClick={() => { setGeoAll(true); setCities([]); setRegions([]); }}>Вся Россия</Button>
+            <Button size="sm" variant={geoAll ? "default" : "outline"} onClick={() => { setGeoAll(true); setCities([]); setRegions([]); setGeoQ(""); }}>Вся Россия</Button>
             {districts.slice(0, 6).map((d) => (
               <Button key={d.id} size="sm" variant="outline" onClick={() => {
                 const regs = flat.filter((x) => x.kind === "region" && x.fo === d.title);
@@ -617,7 +807,7 @@ function Feature({ icon, title, text }: { icon: React.ReactNode; title: string; 
 }
 
 function SearchScreen({ hunt }: { hunt: HuntPayload | null }) {
-  const target = Math.max(1, Number(hunt?.target_count) || 10);
+  const target = Math.max(1, Number(hunt?.target_count) || 1);
   const found = (hunt?.companies || []).length;
   const status = hunt?.status || "running";
   const progressText = hunt?.progress || "Собираем данные…";
@@ -732,14 +922,32 @@ function ResultsScreen({
 
 function LeadCard({ lead, onTakeKp }: { lead: LeadView; onTakeKp: (inn: string) => Promise<void> }) {
   const [busy, setBusy] = useState(false);
-  const phoneHref = lead.phone && lead.phone !== "нет телефона"
+  const phoneHref = lead.phone && !lead.phone.includes("не найден")
     ? `tel:${lead.phone.replace(/[^\d+]/g, "")}`
     : undefined;
+  const siteHref = lead.site
+    ? (lead.site.startsWith("http") ? lead.site : `https://${lead.site}`)
+    : undefined;
+  const emailHref = lead.email ? `mailto:${lead.email}` : undefined;
+  const vkHref = lead.vkLpr;
+  const vkLabel = lead.vkRecheck
+      ? "ВК · перепроверить"
+      : lead.vkLpr
+        ? "Личный ВК"
+        : "";
+  const companyPhoneHref = lead.companyPhone
+    ? `tel:${lead.companyPhone.replace(/[^\d+]/g, "")}`
+    : undefined;
+  const companyMessengerHref = lead.companyMessenger;
+  const companyVkHref = lead.companyVk;
   return (
     <article className="panel overflow-hidden">
       <div className="relative">
         <img src={lead.image} alt={lead.name} className="aspect-[16/9] w-full object-cover" loading="lazy" width={960} height={640} onError={(e) => { (e.currentTarget as HTMLImageElement).src = fallbackOmega; }} />
         <span className={cn("status-pill absolute left-3 top-3", `status-${lead.tone}`)}>{lead.status}</span>
+        <span className={cn("absolute bottom-3 left-3 rounded-full px-2.5 py-1 text-xs font-medium", lead.hasRealPhoto ? "bg-background/80 text-foreground" : "bg-destructive/90 text-destructive-foreground")}>
+          {lead.photoStatus}
+        </span>
       </div>
       <div className="p-5">
         <h2 className="font-display text-lg font-semibold">{lead.name}</h2>
@@ -750,8 +958,28 @@ function LeadCard({ lead, onTakeKp }: { lead: LeadView; onTakeKp: (inn: string) 
         <div className="my-4 border-y border-border py-4">
           <p className="text-sm font-medium">{lead.company}</p>
           <p className="mt-1 text-xs text-muted-foreground">ИНН {lead.inn || "—"}</p>
+          {lead.relationLabel ? <p className="mt-1 text-xs text-muted-foreground">Связь: {lead.relationLabel}</p> : null}
+          {lead.lightingLabel ? <p className="mt-1 text-xs text-primary">{lead.lightingLabel}</p> : null}
+          {lead.ownerCandidates?.length ? (
+            <div className="mt-3 space-y-1">
+              <p className="text-xs text-muted-foreground">Кандидаты собственника / оператора</p>
+              {lead.ownerCandidates.map((owner) => (
+                <p key={`${owner.inn}-${owner.name}`} className="truncate text-xs text-muted-foreground">
+                  <span className="text-foreground">{owner.name || "Юрлицо без названия"}</span>
+                  {owner.inn ? ` · ИНН ${owner.inn}` : ""}
+                  {owner.score ? ` · ${owner.score}/99` : ""}
+                  {owner.source ? ` · ${owner.source}` : ""}
+                </p>
+              ))}
+            </div>
+          ) : null}
         </div>
-        <p className="mb-2 text-xs text-muted-foreground">Кому звонить</p>
+        <p className="mb-2 text-xs text-muted-foreground">Кому писать</p>
+        {!lead.personalContactOk ? (
+          <p className="mb-3 rounded-md border border-border bg-secondary/60 px-3 py-2 text-xs text-muted-foreground">
+            Личный телефон, почта или мессенджер владельца/ЛПР пока не подтверждены.
+          </p>
+        ) : null}
         <div className="flex items-center gap-3">
           <span className="grid size-10 shrink-0 place-items-center rounded-full bg-secondary"><UserRound /></span>
           <div className="min-w-0">
@@ -759,28 +987,125 @@ function LeadCard({ lead, onTakeKp }: { lead: LeadView; onTakeKp: (inn: string) 
             <p className="truncate text-xs text-muted-foreground">{lead.role}</p>
           </div>
         </div>
-        <div className="mt-4 flex items-center justify-between gap-2">
+        {lead.people && lead.people.length > 0 ? (
+          <div className="mt-3 space-y-2">
+            <p className="text-xs text-muted-foreground">
+              {lead.personalContactOk ? "Подтверждённые люди" : "Кандидаты по реестрам без личного канала"}
+            </p>
+            {lead.people.map((p) => (
+              <div key={`${p.name}-${p.role}`} className="min-w-0 rounded-md border border-border/60 px-3 py-2">
+                <p className="truncate text-sm font-medium">{p.name}</p>
+                <p className="truncate text-xs text-muted-foreground">{p.role}{p.why ? ` · ${p.why}` : ""}</p>
+                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs">
+                  {p.phone ? <a href={`tel:${p.phone.replace(/[^\d+]/g, "")}`} className="text-primary">{p.phone}</a> : null}
+                  {p.email ? <a href={`mailto:${p.email}`} className="text-primary truncate">{p.email}</a> : null}
+                  {p.vk ? <a href={p.vk} target="_blank" rel="noreferrer" className="text-primary">ВК</a> : null}
+                  {p.telegram ? <a href={p.telegram} target="_blank" rel="noreferrer" className="text-primary">Telegram</a> : null}
+                  {p.whatsapp ? <a href={p.whatsapp} target="_blank" rel="noreferrer" className="text-primary">WhatsApp</a> : null}
+                  {!p.phone && !p.email && !p.vk && !p.telegram && !p.whatsapp ? <span className="text-muted-foreground">личный контакт не найден</span> : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {lead.founders && lead.founders.length > 0 ? (
+          <p className="mt-3 text-xs text-muted-foreground">
+            Учредители / бенефициары: <span className="text-foreground">{lead.founders.join("; ")}</span>
+          </p>
+        ) : null}
+        <div className="mt-4 space-y-2 text-sm">
           {phoneHref ? (
-            <a href={phoneHref} className="flex items-center gap-2 text-sm"><Phone className="size-4 text-primary" />{lead.phone}</a>
+            <a href={phoneHref} className="flex items-center gap-2"><Phone className="size-4 shrink-0 text-primary" />{lead.phone}</a>
           ) : (
-            <span className="flex items-center gap-2 text-sm text-muted-foreground"><Phone className="size-4" />{lead.phone}</span>
+            <span className="flex items-center gap-2 text-muted-foreground"><Phone className="size-4 shrink-0" />{lead.phone}</span>
           )}
-          {lead.vkLpr ? <a href={lead.vkLpr} target="_blank" rel="noreferrer"><ExternalLink className="size-4 text-muted-foreground" /></a> : null}
+          {emailHref ? (
+            <a href={emailHref} className="flex items-center gap-2 truncate">
+              <Mail className="size-4 shrink-0 text-primary" />
+              <span className="truncate">Личная почта: {lead.email}</span>
+            </a>
+          ) : (
+            <span className="flex items-center gap-2 text-muted-foreground"><Mail className="size-4 shrink-0" />личная почта не найдена</span>
+          )}
+          {vkHref ? (
+            <a href={vkHref} target="_blank" rel="noreferrer" className="flex items-center gap-2 truncate">
+              <Link2 className="size-4 shrink-0 text-primary" />
+              <span className="truncate">{vkLabel}: {vkHref.replace(/^https?:\/\//, "")}</span>
+            </a>
+          ) : (
+            <span className="flex items-center gap-2 text-muted-foreground"><Link2 className="size-4 shrink-0" />личный ВК/профиль не найден</span>
+          )}
+          {lead.messenger ? (
+            <a href={lead.messenger} target="_blank" rel="noreferrer" className="flex items-center gap-2 truncate">
+              <Sparkles className="size-4 shrink-0 text-primary" />
+              <span className="truncate">Личный мессенджер: {lead.messenger.replace(/^https?:\/\//, "")}</span>
+            </a>
+          ) : (
+            <span className="flex items-center gap-2 text-muted-foreground"><Sparkles className="size-4 shrink-0" />личный мессенджер не найден</span>
+          )}
+        </div>
+        <div className="mt-4 space-y-2 border-t border-border pt-4 text-sm">
+          <p className="text-xs text-muted-foreground">Контакты объекта / оператора</p>
+          {companyPhoneHref ? (
+            <a href={companyPhoneHref} className="flex items-center gap-2"><Phone className="size-4 shrink-0 text-primary" />{lead.companyPhone}</a>
+          ) : (
+            <span className="flex items-center gap-2 text-muted-foreground"><Phone className="size-4 shrink-0" />телефон объекта не найден</span>
+          )}
+          {siteHref ? (
+            <a href={siteHref} target="_blank" rel="noreferrer" className="flex items-center gap-2 truncate">
+              <ExternalLink className="size-4 shrink-0 text-primary" />
+              <span className="truncate">Сайт: {lead.site}</span>
+            </a>
+          ) : (
+            <span className="flex items-center gap-2 text-muted-foreground"><ExternalLink className="size-4 shrink-0" />Сайт: нет</span>
+          )}
+          {companyVkHref ? (
+            <a href={companyVkHref} target="_blank" rel="noreferrer" className="flex items-center gap-2 truncate">
+              <Link2 className="size-4 shrink-0 text-primary" />
+              <span className="truncate">ВК объекта: {companyVkHref.replace(/^https?:\/\//, "")}</span>
+            </a>
+          ) : (
+            <span className="flex items-center gap-2 text-muted-foreground"><Link2 className="size-4 shrink-0" />ВК канал: нет</span>
+          )}
+          {companyMessengerHref ? (
+            <a href={companyMessengerHref} target="_blank" rel="noreferrer" className="flex items-center gap-2 truncate">
+              <Sparkles className="size-4 shrink-0 text-primary" />
+              <span className="truncate">Мессенджер объекта: {companyMessengerHref.replace(/^https?:\/\//, "")}</span>
+            </a>
+          ) : (
+            <span className="flex items-center gap-2 text-muted-foreground"><Sparkles className="size-4 shrink-0" />Мессенджер: нет</span>
+          )}
+          {lead.companyEmail ? (
+            <a href={`mailto:${lead.companyEmail}`} className="flex items-center gap-2 truncate">
+              <Mail className="size-4 shrink-0 text-primary" />
+              <span className="truncate">Почта объекта: {lead.companyEmail}</span>
+            </a>
+          ) : (
+            <span className="flex items-center gap-2 text-muted-foreground"><Mail className="size-4 shrink-0" />Почта: нет</span>
+          )}
         </div>
         <p className="mt-4 text-xs text-muted-foreground">
           Выручка: <span className="text-foreground">{lead.revenue}</span>
           {" · "}Прибыль: <span className="text-foreground">{lead.profit}</span>
           {" · "}Расходы: <span className="text-foreground">{lead.expense}</span>
+          {lead.financeYear ? <>{" · "}Год: <span className="text-foreground">{lead.financeYear}</span></> : null}
         </p>
         {lead.hint ? <p className="mt-2 text-xs text-muted-foreground">{lead.hint}</p> : null}
-        <div className="mt-5 grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+        {lead.contactNote ? <p className="mt-2 text-xs text-muted-foreground">{lead.contactNote}</p> : null}
+        {lead.auditLabel ? (
+          <p className={cn("mt-2 text-xs", lead.tone === "good" ? "text-primary" : "text-muted-foreground")}>
+            {lead.auditLabel}
+          </p>
+        ) : null}
+        <div className="mt-5">
           <Button
-            disabled={!lead.inn || busy}
+            className="h-11 w-full"
+            disabled={!lead.saveId || busy}
             onClick={async () => {
-              if (!lead.inn) return;
+              if (!lead.saveId) return;
               setBusy(true);
               try {
-                await onTakeKp(lead.inn);
+                await onTakeKp(lead.saveId);
               } finally {
                 setBusy(false);
               }
@@ -788,21 +1113,6 @@ function LeadCard({ lead, onTakeKp }: { lead: LeadView; onTakeKp: (inn: string) 
           >
             {busy ? "Сохраняю…" : "Взять в КП"}
           </Button>
-          {lead.site ? (
-            <Button
-              variant="outline"
-              size="icon"
-              onClick={() => {
-                const href = lead.site!.startsWith("http") ? lead.site! : `https://${lead.site}`;
-                window.open(href, "_blank", "noopener,noreferrer");
-              }}
-              aria-label="Сайт"
-            >
-              <ExternalLink />
-            </Button>
-          ) : (
-            <Button variant="outline" size="icon" disabled aria-label="Нет сайта"><Bookmark /></Button>
-          )}
         </div>
       </div>
     </article>

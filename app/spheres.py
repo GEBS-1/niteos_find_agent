@@ -63,7 +63,6 @@ SPHERES: dict[str, Sphere] = {
         okved=("68.20", "68.32", "41.20", "55.10", "56.10", "47.19"),
         options=(
             SphereOption("mall", "ТЦ / ТРК", "торговый центр"),
-            SphereOption("business", "Бизнес-центр", "бизнес центр"),
             SphereOption("hotel", "Отель", "гостиница"),
             SphereOption("restaurant", "Ресторанный комплекс", "ресторанный комплекс"),
             SphereOption("facade", "Фасад под подсветку", "коммерческое здание фасад"),
@@ -85,13 +84,13 @@ SPHERES: dict[str, Sphere] = {
     ),
     "industry": Sphere(
         id="industry",
-        title="Промка / цеха",
+        title="Промышленные здания",
         okved=("10.11", "10.89", "25.11", "25.99", "28.29", "28.41"),
         options=(
             SphereOption("zavod", "Завод", "завод"),
-            SphereOption("ceh", "Цех", "цех"),
-            SphereOption("proizv", "Производство", "производство"),
+            SphereOption("corp", "Производственный корпус", "производственный корпус"),
             SphereOption("promzdanie", "Промздание", "промышленное здание"),
+            SphereOption("technopark", "Технопарк", "технопарк"),
         ),
         idea="NT-PROM / NT-ЛУЧ, пыль и высота пролёта",
     ),
@@ -122,13 +121,12 @@ SPHERES: dict[str, Sphere] = {
     ),
     "housing": Sphere(
         id="housing",
-        title="ЖКХ / жилые комплексы",
+        title="Жилые комплексы",
         okved=("68.32", "68.20", "41.20", "81.10"),
         options=(
             SphereOption("jk", "Жилой комплекс", "жилой комплекс"),
-            SphereOption("uk", "Управляющая компания", "управляющая компания ЖКХ"),
-            SphereOption("tszh", "ТСЖ / ТСН", "ТСЖ"),
-            SphereOption("entrance", "Подъезд / двор", "освещение двора ЖКХ"),
+            SphereOption("mkd", "Многоквартирный дом", "многоквартирный дом"),
+            SphereOption("yard", "Двор ЖК", "двор жилого комплекса"),
         ),
         idea="ЖКХ: двор, подъезды, фасад дома, входные группы",
     ),
@@ -148,17 +146,33 @@ SPHERES: dict[str, Sphere] = {
     ),
     "office": Sphere(
         id="office",
-        title="Офисы / деловые центры",
+        title="Офисные здания",
         okved=("68.20", "68.32", "62.01", "70.22", "82.11"),
         options=(
             SphereOption("bc", "Бизнес-центр", "бизнес центр"),
             SphereOption("office", "Офисное здание", "офисное здание"),
-            SphereOption("cowork", "Коворкинг", "коворкинг"),
-            SphereOption("hq", "Штаб-квартира", "офис компании"),
+            SphereOption("business_house", "Деловой центр", "деловой центр"),
         ),
         idea="Офис: open-space, переговорки, фасад и входная группа",
     ),
 }
+
+
+BUILDING_SPHERE_IDS: tuple[str, ...] = (
+    "commercial",
+    "office",
+    "warehouse",
+    "industry",
+    "sports",
+    "social",
+    "housing",
+    "azs",
+)
+
+
+def building_spheres() -> list[Sphere]:
+    """Directions shown in the UI: only buildings/objects with owner/operator logic."""
+    return [SPHERES[sid] for sid in BUILDING_SPHERE_IDS if sid in SPHERES]
 
 
 def parse_okved(raw: str) -> list[str]:

@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 
 from app.dadata import DaDataError, flatten_party
+from app.contacts import _looks_like_person_fio
 
 
 def _registration_date_from_state(state: dict[str, Any]) -> str:
@@ -224,11 +225,20 @@ def enrich_from_dadata(suggestion: dict[str, Any]) -> dict[str, Any]:
             managers.append(bit)
 
     post = (management.get("post") or "").strip()
-    base["management_post"] = post
-    if post and base.get("management"):
-        base["management_label"] = f"{base['management']} — {post}"
+    mgmt_name = str(base.get("management") or "").strip()
+    # ЕГРЮЛ часто пишет УК/ООО как management.name — это не человек
+    if mgmt_name and not _looks_like_person_fio(mgmt_name):
+        base["management_org"] = mgmt_name
+        base["management_org_post"] = post or "управляющая организация (ЕГРЮЛ)"
+        base["management"] = ""
+        base["management_post"] = ""
+        base["management_label"] = ""
     else:
-        base["management_label"] = base.get("management") or ""
+        base["management_post"] = post
+        if post and base.get("management"):
+            base["management_label"] = f"{base['management']} — {post}"
+        else:
+            base["management_label"] = base.get("management") or ""
 
     base["founders"] = founders[:8]
     base["founders_detail"] = founders_detail[:8]

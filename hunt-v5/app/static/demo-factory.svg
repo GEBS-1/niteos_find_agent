@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="800" viewBox="0 0 1400 800">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#18382c"/>
+      <stop offset="1" stop-color="#09130f"/>
+    </linearGradient>
+    <linearGradient id="wall" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#263c33"/>
+      <stop offset="1" stop-color="#12231c"/>
+    </linearGradient>
+  </defs>
+  <rect width="1400" height="800" fill="url(#sky)"/>
+  <rect y="610" width="1400" height="190" fill="#07100d"/>
+  <rect x="120" y="330" width="950" height="310" rx="8" fill="url(#wall)" stroke="#6CF5B5" stroke-opacity=".25"/>
+  <path d="M120 330 L330 250 L555 330 L760 245 L1070 330" fill="#193027" stroke="#446b58" stroke-width="5"/>
+  <rect x="210" y="420" width="210" height="160" fill="#0a1511" stroke="#345344"/>
+  <rect x="500" y="410" width="220" height="170" fill="#0a1511" stroke="#345344"/>
+  <rect x="800" y="400" width="170" height="180" fill="#0a1511" stroke="#345344"/>
+  <rect x="1120" y="180" width="70" height="460" fill="#20382e" stroke="#446b58"/>
+  <rect x="1210" y="260" width="50" height="380" fill="#1a3027" stroke="#446b58"/>
+  <text x="140" y="715" font-family="Arial, sans-serif" font-size="34" fill="#6CF5B5" font-weight="700">DEMO OBJECT PHOTO</text>
+  <text x="140" y="755" font-family="Arial, sans-serif" font-size="20" fill="#91aa9e">В live-режиме здесь показывается фото из подключённого источника.</text>
+</svg>

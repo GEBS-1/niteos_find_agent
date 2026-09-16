@@ -4,6 +4,8 @@ from unittest.mock import patch
 
 from app.cost_guard import (
     cheap_mode_enabled,
+    llm_card_audit_enabled,
+    llm_oneshot_enabled,
     llm_owner_enabled,
     llm_verify_enabled,
     llm_web_enabled,
@@ -17,6 +19,8 @@ class CostGuardTests(unittest.TestCase):
             self.assertFalse(llm_web_enabled())
             self.assertFalse(llm_owner_enabled())
             self.assertFalse(llm_verify_enabled())
+            self.assertTrue(llm_card_audit_enabled())
+            self.assertTrue(llm_oneshot_enabled())
 
     def test_legacy_flags_cannot_bypass_cheap_mode(self):
         env = {
@@ -35,6 +39,11 @@ class CostGuardTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True):
             self.assertTrue(llm_owner_enabled())
             self.assertFalse(llm_web_enabled())
+
+    def test_force_verify_allows_extra_routerai_check(self):
+        with patch.dict(os.environ, {"HUNT_CHEAP_MODE": "1"}, clear=True):
+            self.assertFalse(llm_verify_enabled())
+            self.assertTrue(llm_verify_enabled(force=True))
 
 
 if __name__ == "__main__":

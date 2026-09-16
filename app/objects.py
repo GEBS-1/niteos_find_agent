@@ -79,6 +79,23 @@ _BUILDING_GRADE = (
     "арена",
     "дворец спорта",
     "бассейн",
+    "гостиниц",
+    "отел",
+    "ресторанный комплекс",
+    "завод",
+    "фабрик",
+    "производствен",
+    "промышленное здание",
+    "промздание",
+    "административное здание",
+    "офисное здание",
+    "штаб-квартира",
+    "больниц",
+    "поликлин",
+    "медицинский центр",
+    "медцентр",
+    "дворец культуры",
+    "дк ",
 )
 
 _SPORTS_GRADE = (
@@ -122,6 +139,27 @@ def is_school_building_title(title: str) -> bool:
 def is_sports_building_title(title: str) -> bool:
     t = (title or "").strip().lower().replace("ё", "е")
     return bool(t) and any(w in t for w in _SPORTS_GRADE)
+
+
+def is_industry_building_title(title: str) -> bool:
+    t = (title or "").strip().lower().replace("ё", "е")
+    return bool(t) and any(
+        w in t
+        for w in (
+            "завод",
+            "фабрик",
+            "производствен",
+            "промышленное здание",
+            "промздание",
+            "цех ",
+            " цех",
+        )
+    )
+
+
+def is_housing_building_title(title: str) -> bool:
+    t = (title or "").strip().lower().replace("ё", "е")
+    return bool(t) and any(w in t for w in ("жилой комплекс", "жк ", " жк", "жилкомплекс"))
 
 
 def is_institution_building_title(title: str) -> bool:
@@ -206,10 +244,27 @@ def is_tenant_inside_host(title: str) -> bool:
     return bool(has_tenant and has_host)
 
 
+def is_closed_object_title(title: str) -> bool:
+    t = (title or "").strip().lower().replace("ё", "е")
+    if not t:
+        return False
+    return any(
+        marker in t
+        for marker in (
+            "больше не работает",
+            "закрыто",
+            "закрыт",
+            "ликвидирован",
+            "временно не работает",
+            "не работает",
+        )
+    )
+
+
 def is_building_grade_title(title: str, query: str = "") -> bool:
     """Named mall / BC / complex / school — the thing we sell light to."""
     t = (title or "").strip().lower().replace("ё", "е")
-    if not t or is_tenant_inside_host(title):
+    if not t or is_tenant_inside_host(title) or is_closed_object_title(title):
         return False
     if is_generic_object_title(title, query):
         return False
@@ -285,6 +340,18 @@ def _city_slug(city: str) -> str:
     return ""
 
 
+def _join_query_city(query: str, city: str) -> str:
+    query = (query or "").strip()
+    city = (city or "").strip()
+    if not query:
+        return city
+    if not city:
+        return query
+    if re.search(rf"(^|\s){re.escape(city.lower())}(\s|$)", query.lower()):
+        return query
+    return f"{query} {city}".strip()
+
+
 # Minimum confidence to keep a legal entity attached to a building.
 MIN_RELATION_CONFIDENCE = 50
 # Photos only after a stronger link (avoid random facade shots).
@@ -303,8 +370,16 @@ def accept_building_candidate(
     address = (address or "").strip()
     if not title:
         return {"ok": False, "reason": "пустое название здания", "rec": None}
+    if is_bare_workshop_title(title):
+        return {
+            "ok": False,
+            "reason": "общее название цеха/завода без имени предприятия",
+            "rec": None,
+        }
     if title.lower().startswith("строительств"):
         return {"ok": False, "reason": "стройка, не готовый объект", "rec": None}
+    if is_closed_object_title(title):
+        return {"ok": False, "reason": "объект помечен как закрытый/неработающий", "rec": None}
     if is_tenant_inside_host(title):
         return {
             "ok": False,
@@ -336,7 +411,10 @@ def accept_building_candidate(
             "бизнес центр",
             "бизнес-центр",
             "бц",
-            "жил",
+            "гостиниц",
+            "отел",
+            "фасад",
+            "коммерческое здание",
         )
     )
     warehouseish = sphere == "warehouse" or any(
@@ -346,6 +424,19 @@ def accept_building_candidate(
         w in q for w in ("магазин", "пятёроч", "пятероч", "магнит", "ритейл")
     )
     azsish = sphere == "azs" or any(w in q for w in ("азс", "заправк", "автозаправ"))
+    industryish = sphere == "industry" or any(
+        w in q for w in ("завод", "цех", "производ", "промышлен")
+    )
+    sportsish = sphere == "sports" or any(
+        w in q for w in ("стадион", "арена", "спорт", "бассейн")
+    )
+    socialish = sphere == "social" or any(
+        w in q for w in ("школ", "лицей", "гимнази", "больниц", "поликлин", "дворец культуры", "дк")
+    )
+    housingish = sphere == "housing" or any(w in q for w in ("жилой", "жк", "тсж", "жкх"))
+    officeish = sphere == "office" or any(
+        w in q for w in ("бизнес центр", "бизнес-центр", "офисное здание", "офис компании", "штаб")
+    )
     if sphere == "commercial" or mallish:
         if not is_building_grade_title(title, query):
             return {
@@ -367,6 +458,51 @@ def accept_building_candidate(
             }
         # Accept named warehouses even without perfect street parse from OSM
         return {"ok": True, "reason": "склад/логистика принят", "rec": rec}
+    if industryish:
+        low_t = title.lower().replace("ё", "е")
+        looks = is_industry_building_title(title) or any(
+            w in low_t for w in ("промышлен", "производств", "технопарк")
+        )
+        if not looks and not streetish_address(address):
+            return {
+                "ok": False,
+                "reason": "для промки нужен завод/производство/корпус или уличный адрес",
+                "rec": rec,
+            }
+        return {"ok": True, "reason": "промышленный объект принят", "rec": rec}
+    if sportsish:
+        if not is_sports_building_title(title) and not streetish_address(address):
+            return {
+                "ok": False,
+                "reason": "для спорта нужен стадион/арена/спорткомплекс или точный адрес",
+                "rec": rec,
+            }
+        return {"ok": True, "reason": "спортобъект принят", "rec": rec}
+    if socialish:
+        if not is_institution_building_title(title) and not streetish_address(address):
+            return {
+                "ok": False,
+                "reason": "для соцобъекта нужна школа/больница/ДК или точный адрес",
+                "rec": rec,
+            }
+        return {"ok": True, "reason": "соцобъект принят", "rec": rec}
+    if housingish:
+        if not is_housing_building_title(title) and not streetish_address(address):
+            return {
+                "ok": False,
+                "reason": "для ЖК нужен жилой комплекс/дом с точным адресом",
+                "rec": rec,
+            }
+        return {"ok": True, "reason": "ЖК/жилой объект принят", "rec": rec}
+    if officeish:
+        low_t = title.lower().replace("ё", "е")
+        if not any(w in low_t for w in ("бизнес", "бц", "офис", "деловой", "штаб")) and not streetish_address(address):
+            return {
+                "ok": False,
+                "reason": "для офиса нужен БЦ/офисное здание или точный адрес",
+                "rec": rec,
+            }
+        return {"ok": True, "reason": "офисное здание принято", "rec": rec}
     if shopish:
         # Small retail POIs often lack «ул.» in OSM — allow if title isn't empty type
         if is_generic_object_title(title, query) and not streetish_address(address):
@@ -406,6 +542,41 @@ def relation_accepted(rel: dict[str, Any] | None, *, min_score: int = MIN_RELATI
     except (TypeError, ValueError):
         conf = 0
     return conf >= min_score
+
+
+def relation_usable(
+    rel: dict[str, Any] | None,
+    *,
+    min_score: int = MIN_RELATION_CONFIDENCE,
+    allow_source: bool = True,
+) -> bool:
+    """Accept strong relation OR soft «из источника» candidate for the card."""
+    if relation_accepted(rel, min_score=min_score):
+        return True
+    if not allow_source or not isinstance(rel, dict):
+        return False
+    status = str(rel.get("status") or "").lower()
+    if rel.get("soft") or "из источника" in status:
+        try:
+            conf = int(rel.get("confidence") or 0)
+        except (TypeError, ValueError):
+            conf = 0
+        return conf >= 15 or bool(rel.get("found_via"))
+    return False
+
+
+def is_bare_workshop_title(title: str) -> bool:
+    """OSM often names plants just «Цех (улица…)» — too weak for a lead card."""
+    t = (title or "").strip().lower().replace("ё", "е")
+    if not t:
+        return True
+    if re.search(r"[«\"].+[»\"]", title or ""):
+        return False
+    if re.match(r"^(цех|завод|производство|мастерская)\s*\([^)]+\)\s*$", t):
+        return True
+    if t in {"цех", "завод", "производство", "мастерская"}:
+        return True
+    return False
 
 
 def building_dedupe_key(title: str, address: str = "") -> str:
@@ -512,6 +683,8 @@ _BAD_IMAGE_HOST_PARTS = (
     "google.",
     "gstatic.",
     "mc.yandex",
+    "images.yandex",
+    "yandex-images",
     "vk.com/images",
     "ytimg.com",
     "youtube.com",
@@ -553,6 +726,47 @@ _BAD_IMAGE_PATH_PARTS = (
     "-180x180",
     "-270x270",
 )
+
+
+def _translit_ru(text: str) -> str:
+    table = str.maketrans(
+        {
+            "а": "a",
+            "б": "b",
+            "в": "v",
+            "г": "g",
+            "д": "d",
+            "е": "e",
+            "ё": "e",
+            "ж": "zh",
+            "з": "z",
+            "и": "i",
+            "й": "y",
+            "к": "k",
+            "л": "l",
+            "м": "m",
+            "н": "n",
+            "о": "o",
+            "п": "p",
+            "р": "r",
+            "с": "s",
+            "т": "t",
+            "у": "u",
+            "ф": "f",
+            "х": "h",
+            "ц": "ts",
+            "ч": "ch",
+            "ш": "sh",
+            "щ": "sch",
+            "ы": "y",
+            "э": "e",
+            "ю": "yu",
+            "я": "ya",
+            "ъ": "",
+            "ь": "",
+        }
+    )
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower().replace("ё", "е").translate(table)).strip()
 
 
 def _clean_image_url(raw: str) -> str:
@@ -605,31 +819,24 @@ def object_photo_ok(url: str) -> bool:
     path = (parsed.path or "").lower()
     if not host:
         return False
-    # Yandex Maps org photos are valid object evidence.
-    yandex_photo_ok = any(
-        x in host
-        for x in (
-            "avatars.mds.yandex.net",
-            "yandex-images",
-            "img.yandex",
-            "images.yandex",
-        )
-    )
-    if any(part in host for part in _BAD_IMAGE_HOST_PARTS) and not yandex_photo_ok:
+    # Only Yandex Maps org gallery is valid evidence. Search thumbnails are not.
+    yandex_maps_photo = "avatars.mds.yandex.net" in host and "/get-altay/" in path
+    if "avatars.mds.yandex.net" in host and not yandex_maps_photo:
+        return False
+    if any(part in host for part in _BAD_IMAGE_HOST_PARTS) and not yandex_maps_photo:
         return False
     if any(part in low for part in _BAD_IMAGE_PATH_PARTS):
         return False
     if path.endswith((".svg", ".gif", ".ico")):
         return False
-    if yandex_photo_ok:
+    if yandex_maps_photo:
         # Require a real size segment (orig/XXL/…) — not a template stub
-        if "get-altay" in low:
-            parts = [p for p in path.split("/") if p]
-            if len(parts) < 4:
-                return False
-            size = parts[-1]
-            if size in {"%", "%s"} or size.startswith("%") or "{" in size:
-                return False
+        parts = [p for p in path.split("/") if p]
+        if len(parts) < 4:
+            return False
+        size = parts[-1]
+        if size in {"%", "%s"} or size.startswith("%") or "{" in size:
+            return False
         return True
     return any(
         marker in low
@@ -1016,6 +1223,20 @@ def object_company_relation(company: dict[str, Any], obj: dict[str, Any]) -> dic
         w in object_title.lower().replace("ё", "е")
         for w in ("склад", "логист", "терминал")
     )
+    industry_obj = is_industry_building_title(object_title)
+    housing_obj = is_housing_building_title(object_title)
+    hotel_obj = any(
+        w in object_title.lower().replace("ё", "е")
+        for w in ("гостиниц", "отел")
+    )
+    office_obj = any(
+        w in object_title.lower().replace("ё", "е")
+        for w in ("бизнес-центр", "бизнес центр", "бц ", " бц", "офис", "деловой")
+    )
+    medical_obj = any(
+        w in object_title.lower().replace("ё", "е")
+        for w in ("больниц", "поликлин", "медцентр", "медицинский")
+    )
     quoted = ""
     qm = re.search(r"[«\"„]([^»\"“]{3,60})[»\"“]", object_title or "")
     if qm:
@@ -1039,6 +1260,38 @@ def object_company_relation(company: dict[str, Any], obj: dict[str, Any]) -> dic
     if warehouse_obj and okved.startswith(("52.10", "52.2", "68.", "41.", "46.")):
         score += 12
         reasons.append("ОКВЭД склада/логистики/недвижимости")
+    if industry_obj and any(
+        w in name_low for w in ("завод", "фабрик", "производ", "пром", "технопарк", "индустри")
+    ):
+        score += 28
+        reasons.append("юрлицо похоже на промышленный объект")
+    if industry_obj and okved.startswith(("10.", "11.", "16.", "20.", "22.", "23.", "24.", "25.", "27.", "28.", "29.", "30.", "31.", "32.", "33.", "68.", "41.")):
+        score += 14
+        reasons.append("ОКВЭД производства/недвижимости")
+    if housing_obj and any(w in name_low for w in ("управл", "ук ", "тсж", "тсн", "жк", "жил", "сервис")):
+        score += 28
+        reasons.append("юрлицо похоже на УК/ТСЖ/оператора ЖК")
+    if housing_obj and okved.startswith(("68.32", "68.20", "81.10", "41.20")):
+        score += 14
+        reasons.append("ОКВЭД управления/обслуживания недвижимости")
+    if hotel_obj and any(w in name_low for w in ("гостиниц", "отел", "hotel", "хотел", "девелоп", "управл")):
+        score += 24
+        reasons.append("юрлицо похоже на оператора гостиницы")
+    if hotel_obj and okved.startswith(("55.", "68.", "41.")):
+        score += 12
+        reasons.append("ОКВЭД гостиницы/недвижимости")
+    if office_obj and any(w in name_low for w in ("бизнес", "деловой", "офис", "управл", "девелоп", "недвижим")):
+        score += 24
+        reasons.append("юрлицо похоже на УК/оператора офисного здания")
+    if office_obj and okved.startswith(("68.", "41.", "70.10", "82.11")):
+        score += 12
+        reasons.append("ОКВЭД офисов/недвижимости/управления")
+    if medical_obj and any(w in name_low for w in ("больниц", "поликлин", "мед", "клиник", "здрав")):
+        score += 28
+        reasons.append("юрлицо похоже на медицинское учреждение")
+    if medical_obj and okved.startswith(("86.", "84.")):
+        score += 14
+        reasons.append("ОКВЭД медицины/госучреждения")
     if quoted and len(quoted) >= 4 and quoted in name_low:
         score += 32
         reasons.append(f"имя объекта «{quoted}» в названии юрлица")
@@ -1217,7 +1470,7 @@ async def search_objects_2gis(
     if not query:
         return []
     slug = _city_slug(city)
-    q = f"{query} {city}".strip() if city else query
+    q = _join_query_city(query, city)
     if slug:
         url = f"https://2gis.ru/{slug}/search/{quote_plus(q)}"
     else:
@@ -1256,7 +1509,7 @@ async def search_objects_nominatim(
     limit: int = 10,
 ) -> list[dict[str, Any]]:
     """OpenStreetMap Nominatim — addresses of named places."""
-    q = " ".join(x for x in (query, city, "Россия") if x).strip()
+    q = " ".join(x for x in (_join_query_city(query, city), "Россия") if x).strip()
     if not q:
         return []
     url = "https://nominatim.openstreetmap.org/search"
@@ -1396,12 +1649,12 @@ async def search_objects_yandex(
     limit: int = 10,
 ) -> list[dict[str, Any]]:
     """Find named Yandex Maps org cards only (not bare ?text= search)."""
-    q = " ".join(x for x in (query, city) if x).strip()
+    q = _join_query_city(query, city)
     if not q:
         return []
     searches = [
         f"{q} site:yandex.ru/maps/org",
-        f'"{query}" {city} site:yandex.ru/maps/org' if query else q,
+        f'"{query}" {city} site:yandex.ru/maps/org' if query and city and city.lower() not in query.lower() else f'"{query}" site:yandex.ru/maps/org',
         f"{q} яндекс карты организация",
     ]
     links: list[str] = []
@@ -1633,6 +1886,78 @@ async def search_objects(
                     f"логистический комплекс {city}",
                 ]
             )
+    if any(w in qlow for w in ("бизнес", "офис", "штаб", "деловой")):
+        for city in cities:
+            if not city:
+                continue
+            alt_queries.extend(
+                [
+                    f"бизнес центр {city}",
+                    f"БЦ {city}",
+                    f"деловой центр {city}",
+                    f"офисное здание {city}",
+                ]
+            )
+    if any(w in qlow for w in ("завод", "цех", "производ", "промышлен")):
+        for city in cities:
+            if not city:
+                continue
+            alt_queries.extend(
+                [
+                    f"завод {city}",
+                    f"производственный корпус {city}",
+                    f"промышленное здание {city}",
+                    f"технопарк {city}",
+                ]
+            )
+    if any(w in qlow for w in ("стадион", "арена", "спорт", "бассейн")):
+        for city in cities:
+            if not city:
+                continue
+            alt_queries.extend(
+                [
+                    f"стадион {city}",
+                    f"арена {city}",
+                    f"спортивный комплекс {city}",
+                    f"бассейн {city}",
+                ]
+            )
+    if any(w in qlow for w in ("жилой", "жк", "жкх", "тсж", "управляющая компания")):
+        for city in cities:
+            if not city:
+                continue
+            alt_queries.extend(
+                [
+                    f"жилой комплекс {city}",
+                    f"ЖК {city}",
+                    f"управляющая компания ЖК {city}",
+                ]
+            )
+    if any(w in qlow for w in ("школ", "лицей", "гимнази", "больниц", "поликлин", "дворец культуры", "дк")):
+        for city in cities:
+            if not city:
+                continue
+            alt_queries.extend(
+                [
+                    f"школа {city}",
+                    f"лицей {city}",
+                    f"гимназия {city}",
+                    f"больница {city}",
+                    f"дворец культуры {city}",
+                ]
+            )
+    if any(w in qlow for w in ("гостиниц", "отел", "ресторанный комплекс", "фасад")):
+        for city in cities:
+            if not city:
+                continue
+            alt_queries.extend(
+                [
+                    f"гостиница {city}",
+                    f"отель {city}",
+                    f"ресторанный комплекс {city}",
+                    f"коммерческое здание фасад {city}",
+                ]
+            )
     if any(w in qlow for w in ("магазин", "пятёроч", "пятероч", "магнит")):
         for city in cities:
             if not city:
@@ -1663,6 +1988,8 @@ async def search_objects(
                 for item in batch:
                     title = str(item.get("title") or "")
                     address = str(item.get("address") or "")
+                    if is_closed_object_title(title):
+                        continue
                     # Bare amenity labels are OK if we already enriched title or have street address
                     if is_generic_object_title(title, query) and not streetish_address(address):
                         # last chance: keep if title contains brand/number after type word
@@ -1736,8 +2063,17 @@ def _photo_matches_building(url: str, title: str) -> bool:
             "школа",
             "улица",
             "проспект",
+            "торговый",
+            "центр",
+            "бизнес",
         }
     ]
+    translit_tokens = [
+        t
+        for t in re.findall(r"[a-z0-9]{4,}", _translit_ru(title_l))
+        if t not in {"torgovyy", "tsentr", "biznes", "zdanie", "shkola"}
+    ]
+    tokens.extend(t for t in translit_tokens if t not in tokens)
     # Keep distinctive tokens (казань, акбарс, mega, …)
     latin_hints = (
         "kazan",
@@ -2064,17 +2400,21 @@ async def collect_object_photos(
     # 3) Free internet image search (Yandex Images → Bing) by title+city
     if len(candidates) < 2:
         forced: list[str] = []
+        extra = obj.get("_photo_force_queries") or []
+        if isinstance(extra, list):
+            forced.extend(str(x) for x in extra if str(x).strip())
         if title and city:
             forced.extend(
                 [
                     f"{title} {city}",
                     f"{title} {city} фасад",
                     f"{title} {city} здание",
+                    f"{title} {city} завод фасад",
                 ]
             )
         elif title:
             forced.append(title)
-        for q in _uniq(forced + _photo_search_queries(obj), 5):
+        for q in _uniq(forced + _photo_search_queries(obj), 8):
             more = await _yandex_image_urls(client, q, limit=8)
             if not more:
                 more = await _bing_image_urls(client, q, limit=6)
@@ -2086,10 +2426,10 @@ async def collect_object_photos(
                 )
                 if not img:
                     continue
-                # Soft filter: accept yandex thumbs; exterior heuristics when possible
-                if "avatars.mds.yandex.net" in img.lower() or (
+                trusted_map_photo = "avatars.mds.yandex.net/get-altay" in img.lower()
+                if trusted_map_photo or (
                     object_photo_ok(img)
-                    and (_photo_looks_exterior(img) or school or sports)
+                    and _photo_matches_building(img, title)
                 ):
                     candidates.append(img)
             if candidates:
@@ -2099,9 +2439,9 @@ async def collect_object_photos(
     # Probe bytes: drop logos / tiny squares / broken links
     kept: list[str] = []
     for u in _uniq(candidates, 10):
-        if "avatars.mds.yandex.net" in u.lower():
+        if "avatars.mds.yandex.net/get-altay" in u.lower():
             kept.append(u)
-        elif await _photo_is_exterior_candidate(client, u):
+        elif _photo_matches_building(u, title) and await _photo_is_exterior_candidate(client, u):
             kept.append(u)
         if len(kept) >= 3:
             break

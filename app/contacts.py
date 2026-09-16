@@ -10,6 +10,8 @@ from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 import httpx
 
+from app.cost_guard import cheap_mode_enabled
+
 log = logging.getLogger(__name__)
 
 _PHONE_RE = re.compile(
@@ -678,6 +680,14 @@ def _looks_like_person_fio(text: str) -> bool:
         return False
     if "«" in t or "»" in t or '"' in t:
         return False
+    # ЕИО часто = юрлицо («управляющая компания», полное ОПФ) — это не ФИО
+    if (
+        "общество" in low
+        or "ответственност" in low
+        or re.search(r"управляющ\w*\s+компани", low)
+        or re.search(r"\bук\b", low)
+    ):
+        return False
     # Pure job title without a person name
     postish = (
         "генеральный директор",
@@ -959,6 +969,186 @@ async def _site_belongs(
     if not distinctive:
         return False
     return await _page_mentions(client, url, distinctive, inn=inn)
+
+
+def _translit_ru(text: str) -> str:
+    table = str.maketrans(
+        {
+            "а": "a",
+            "б": "b",
+            "в": "v",
+            "г": "g",
+            "д": "d",
+            "е": "e",
+            "ё": "e",
+            "ж": "zh",
+            "з": "z",
+            "и": "i",
+            "й": "y",
+            "к": "k",
+            "л": "l",
+            "м": "m",
+            "н": "n",
+            "о": "o",
+            "п": "p",
+            "р": "r",
+            "с": "s",
+            "т": "t",
+            "у": "u",
+            "ф": "f",
+            "х": "h",
+            "ц": "ts",
+            "ч": "ch",
+            "ш": "sh",
+            "щ": "sch",
+            "ы": "y",
+            "э": "e",
+            "ю": "yu",
+            "я": "ya",
+            "ъ": "",
+            "ь": "",
+        }
+    )
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower().replace("ё", "е").translate(table)).strip()
+
+
+def _object_identity_tokens(title: str) -> list[str]:
+    stop = {
+        "торговый",
+        "торговая",
+        "торгово",
+        "развлекательный",
+        "центр",
+        "бизнес",
+        "молл",
+        "mall",
+        "здание",
+        "объект",
+        "казань",
+        "москва",
+    }
+    tokens = [t for t in _distinctive_tokens(title) if t not in stop]
+    tokens.extend(
+        t
+        for t in re.findall(r"[a-z0-9]{3,}", _translit_ru(title))
+        if t not in stop and t not in {"torgovyy", "tsentr", "biznes", "zdanie", "obekt"}
+    )
+    return _uniq(tokens, 8)
+
+
+def _city_identity_tokens(city: str) -> list[str]:
+    tokens = [t for t in _distinctive_tokens(city) if t not in {"город"}]
+    tokens.extend(t for t in re.findall(r"[a-z0-9]{3,}", _translit_ru(city)))
+    return _uniq(tokens, 4)
+
+
+async def _object_site_belongs(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    obj_title: str,
+    city: str,
+) -> bool:
+    if not url or not _host_ok(url) or _is_generic_site_host(url):
+        return False
+    host_path = unquote_url(url).lower()
+    tokens = _object_identity_tokens(obj_title)
+    city_tokens = _city_identity_tokens(city)
+    if tokens and any(t in host_path for t in tokens):
+        if not city_tokens or any(t in host_path for t in city_tokens):
+            return True
+    try:
+        resp = await client.get(_site_url(url), timeout=12.0)
+    except Exception:
+        return False
+    if resp.status_code >= 400 or not resp.text:
+        return False
+    text = resp.text[:100_000].lower().replace("ё", "е")
+    token_hits = sum(1 for t in tokens if t and t in text)
+    city_hit = not city_tokens or any(t in text for t in city_tokens)
+    building_hit = any(
+        x in text
+        for x in (
+            "тц",
+            "трц",
+            "торговый центр",
+            "бизнес-центр",
+            "бизнес центр",
+            "склад",
+            "логистический комплекс",
+            "терминал",
+            "завод",
+            "производственный корпус",
+            "промышленное здание",
+            "стадион",
+            "арена",
+            "спорткомплекс",
+            "бассейн",
+            "жилой комплекс",
+            "управляющая компания",
+            "школа",
+            "лицей",
+            "гимназия",
+            "больница",
+            "поликлиника",
+            "дворец культуры",
+            "гостиница",
+            "отель",
+        )
+    )
+    return token_hits >= 1 and (city_hit or building_hit)
+
+
+async def _find_object_contacts(
+    client: httpx.AsyncClient,
+    *,
+    obj_title: str,
+    city: str,
+) -> dict[str, Any]:
+    """Object-level site/social/phones. This is useful even when owner contacts are closed."""
+    out: dict[str, Any] = {
+        "site": "",
+        "phones": [],
+        "emails": [],
+        "social": {},
+        "checks": [],
+    }
+    if not obj_title or not _object_identity_tokens(obj_title):
+        return out
+    queries = _uniq(
+        [
+            f'"{obj_title}" {city} официальный сайт'.strip(),
+            f'"{obj_title}" {city} контакты'.strip(),
+            f"{obj_title} {city} сайт телефон".strip(),
+        ],
+        3,
+    )
+    links: list[str] = []
+    for q in queries:
+        links.extend(await _bing_links(client, q))
+        if len(links) >= 12:
+            break
+    for cand in _uniq(links, 12):
+        if not await _object_site_belongs(
+            client, cand, obj_title=obj_title, city=city
+        ):
+            continue
+        if not await _alive(client, cand):
+            continue
+        site = _site_url(cand).split("#")[0].rstrip("/")
+        phones, emails, social = await _harvest_site(client, site)
+        out["site"] = site
+        out["phones"] = phones
+        out["emails"] = emails
+        out["social"] = social or {}
+        out["checks"] = [f"Контакт объекта: сайт найден по «{obj_title}»"]
+        if phones:
+            out["checks"].append("Контакт объекта: телефон с сайта объекта")
+        if social:
+            out["checks"].append("Контакт объекта: соцсети с сайта объекта")
+        return out
+    out["checks"] = [f"Контакт объекта: сайт по «{obj_title}» не найден"]
+    return out
 
 
 CITY_SLUG = {
@@ -1860,8 +2050,10 @@ async def enrich_contacts(
     party: dict[str, Any],
     client: httpx.AsyncClient | None = None,
     llm: Any | None = None,
+    *,
+    deep_verify: bool = False,
 ) -> dict[str, Any]:
-    """Agent-2 online check + optional Agent-3 LLM gate."""
+    """Agent-2 online check + optional Agent-3 LLM gate (deep_verify)."""
     own = client is None
     if client is None:
         client = httpx.AsyncClient(
@@ -1888,6 +2080,12 @@ async def enrich_contacts(
         distinctive = _distinctive_tokens(company)
         fio_needles = _distinctive_tokens(fio)
         smb = _is_smb(party, company)
+        cheap_mode = cheap_mode_enabled() and not deep_verify
+        object_only = bool(
+            (party.get("payload") or {}).get("object_only")
+            if isinstance(party.get("payload"), dict)
+            else False
+        )
         management_label = str(
             party.get("management_label") or party.get("management") or ""
         ).strip()
@@ -1941,6 +2139,9 @@ async def enrich_contacts(
         list_org_url = (
             f"https://www.list-org.com/search?type=inn&val={quote_plus(inn)}" if inn else ""
         )
+        obj_meta = party.get("object") if isinstance(party.get("object"), dict) else {}
+        obj_title = str((obj_meta or {}).get("title") or "").strip()
+        object_contact_site = False
 
         def _merge_social(social: dict[str, list[str]]) -> None:
             nonlocal vk_company, telegram, whatsapp, max_link
@@ -1968,6 +2169,27 @@ async def enrich_contacts(
                 checks.append("Сайт из реестра")
                 break
         sites = [site_url] if site_url else []
+
+        if obj_title and not site_url:
+            object_hit = await _find_object_contacts(
+                client,
+                obj_title=obj_title,
+                city=city,
+            )
+            for note in object_hit.get("checks") or []:
+                checks.append(str(note))
+            obj_site = str(object_hit.get("site") or "")
+            if obj_site:
+                site_url = obj_site
+                object_contact_site = True
+                sites = _uniq([obj_site] + sites)
+                site_candidates.append(obj_site)
+                for p in object_hit.get("phones") or []:
+                    _track_phone(str(p), "сайт объекта")
+                emails = _uniq(emails + [str(e) for e in (object_hit.get("emails") or []) if e])
+                social = object_hit.get("social") if isinstance(object_hit.get("social"), dict) else {}
+                if social:
+                    _merge_social(social)
 
         if inn:
             lo_site, lo_phones, lo_emails, lo_url = await _list_org_contacts(client, inn)
@@ -2144,10 +2366,6 @@ async def enrich_contacts(
                 else:
                     checks.append("Сайт не открылся")
                     site_url = ""
-
-        obj_title = ""
-        if isinstance(party.get("object"), dict):
-            obj_title = str((party.get("object") or {}).get("title") or "").strip()
 
         # Schools (Тататарстан): edu.tatar.ru + verified VK — Bing often returns garbage for RU
         from app.school_contacts import enrich_school_contacts, is_school_context
@@ -2344,17 +2562,21 @@ async def enrich_contacts(
             vk_queries.append(f"{short_co} vk.ru")
             vk_queries.append(f"{short_co} vk.com")
         vk_co_links: list[str] = []
-        for q in vk_queries[:8]:
+        vk_query_limit = 3 if cheap_mode else 8
+        for q in vk_queries[:vk_query_limit]:
             vk_co_links.extend(await _bing_links(client, q))
             await asyncio.sleep(0.35)
         vk_co_links = _uniq(vk_co_links, 12)
-        vk_queries.append(f"site:vk.com/club {short_co} {city}".strip())
-        vk_queries.append(f"site:vk.com/public {short_co} {city}".strip())
-        vk_queries.append(f"site:vk.ru {short_co} {city}".strip())
-        for q in vk_queries[-3:]:
-            vk_co_links.extend(await _bing_links(client, q))
-            await asyncio.sleep(0.35)
-        vk_co_links = _uniq(vk_co_links, 16)
+        if cheap_mode:
+            checks.append("ВК: cheap-mode — проверены только быстрые запросы по объекту/компании")
+        else:
+            vk_queries.append(f"site:vk.com/club {short_co} {city}".strip())
+            vk_queries.append(f"site:vk.com/public {short_co} {city}".strip())
+            vk_queries.append(f"site:vk.ru {short_co} {city}".strip())
+            for q in vk_queries[-3:]:
+                vk_co_links.extend(await _bing_links(client, q))
+                await asyncio.sleep(0.35)
+            vk_co_links = _uniq(vk_co_links, 16)
         # Do NOT invent slug/LLM URLs as accept candidates — only real search hits
         # and links harvested from the company website (added later via evidence).
         prior_vk = [u for u in vk_co_links if _is_vk_url(u)]
@@ -2555,7 +2777,9 @@ async def enrich_contacts(
             checks.append("ВК компании: нет (без угадывания slug)")
         vk_guess = vk_company if vk_verified else ""  # only restore verified
 
-        if fio or party.get("_people_extra"):
+        if cheap_mode or object_only:
+            checks.append("ВК ЛПР: широкий поиск по ФИО пропущен в cheap-mode")
+        elif fio or party.get("_people_extra"):
             await asyncio.sleep(0.3)
             search_people = []
             for name in [fio, *(party.get("_people_extra") or [])]:
@@ -2589,6 +2813,7 @@ async def enrich_contacts(
                             break
                     if vk_lpr:
                         break
+            vk_lpr_recheck = False
             if vk_lpr and _is_vk_person_url(vk_lpr):
                 ok = False
                 for person in search_people[:3]:
@@ -2596,14 +2821,23 @@ async def enrich_contacts(
                         ok = True
                         break
                 if not ok:
-                    checks.append(f"ВК ЛПР сброшен после проверки ФИО: {vk_lpr}")
-                    vk_lpr = ""
+                    vk_lpr_recheck = True
+                    checks.append(
+                        f"ВК ЛПР найден, нужно перепроверить вручную: {vk_lpr}"
+                    )
                 else:
                     checks.append("ВК ЛПР: проверка ФИО пройдена")
+            elif not vk_lpr and person_links:
+                # Soft keep: first search hit with recheck mark (no invention of id)
+                vk_lpr = person_links[0].split("?")[0]
+                vk_lpr_recheck = True
+                checks.append(
+                    f"ВК ЛПР кандидат из поиска — нужно перепроверить: {vk_lpr}"
+                )
             else:
-                vk_lpr = ""
-                if search_people:
+                if search_people and not vk_lpr:
                     checks.append("ВК ЛПР: нет подходящего профиля по ФИО")
+            party["_vk_lpr_recheck"] = vk_lpr_recheck
 
             await asyncio.sleep(0.3)
             web_person = search_people[0] if search_people else fio
@@ -2650,56 +2884,66 @@ async def enrich_contacts(
         else:
             checks.append("ЛПР в ЕГРЮЛ нет — соцсети ЛПР не искали")
 
-        await asyncio.sleep(0.3)
-        tg_links = await _bing_links(
-            client, f'"{company}" {city} t.me telegram'.strip()
-        )
-        tg_candidates = [u for u in tg_links if _is_telegram_url(u)][:8]
-        telegram = _pick_social(tg_links, distinctive, kind="tg")
-        if not telegram and distinctive:
-            for cand in tg_links:
-                if not _is_telegram_url(cand):
-                    continue
-                if await _page_mentions(client, cand, distinctive, inn=inn):
-                    telegram = cand
-                    break
-        if telegram and site_url and _host_core(telegram) == _host_core(site_url):
-            telegram = ""
-        if telegram:
-            checks.append("Telegram найден")
+        if cheap_mode or object_only:
+            checks.append("Мессенджеры: отдельный широкий поиск пропущен в cheap-mode")
+            checks.append("Telegram найден" if telegram else "Telegram: нет")
+            checks.append("WhatsApp найден" if whatsapp else "WhatsApp: нет")
+            checks.append("Max найден" if max_link else "Max: нет")
         else:
-            checks.append("Telegram: нет")
+            await asyncio.sleep(0.3)
+            tg_links = await _bing_links(
+                client, f'"{company}" {city} t.me telegram'.strip()
+            )
+            tg_candidates = [u for u in tg_links if _is_telegram_url(u)][:8]
+            telegram = _pick_social(tg_links, distinctive, kind="tg")
+            if not telegram and distinctive:
+                for cand in tg_links:
+                    if not _is_telegram_url(cand):
+                        continue
+                    if await _page_mentions(client, cand, distinctive, inn=inn):
+                        telegram = cand
+                        break
+            if telegram and site_url and _host_core(telegram) == _host_core(site_url):
+                telegram = ""
+            if telegram:
+                checks.append("Telegram найден")
+            else:
+                checks.append("Telegram: нет")
 
-        await asyncio.sleep(0.3)
-        wa_links = await _bing_links(
-            client, f'"{company}" {city} whatsapp wa.me'.strip()
-        )
-        wa_candidates.extend([u for u in wa_links if _is_whatsapp_url(u)][:8])
-        if not whatsapp:
-            whatsapp = _pick_messenger(wa_links, distinctive, kind="wa")
-        if whatsapp:
-            checks.append("WhatsApp найден")
+            await asyncio.sleep(0.3)
+            wa_links = await _bing_links(
+                client, f'"{company}" {city} whatsapp wa.me'.strip()
+            )
+            wa_candidates.extend([u for u in wa_links if _is_whatsapp_url(u)][:8])
+            if not whatsapp:
+                whatsapp = _pick_messenger(wa_links, distinctive, kind="wa")
+            if whatsapp:
+                checks.append("WhatsApp найден")
+            else:
+                checks.append("WhatsApp: нет")
+
+            await asyncio.sleep(0.3)
+            max_links = await _bing_links(
+                client, f'"{company}" {city} max.ru мессенджер'.strip()
+            )
+            max_candidates.extend([u for u in max_links if _is_max_url(u)][:8])
+            if not max_link:
+                max_link = _pick_messenger(max_links, distinctive, kind="max")
+            if max_link:
+                checks.append("Max найден")
+            else:
+                checks.append("Max: нет")
+
+        if object_only:
+            phone_2gis, maps_url = "", ""
+            checks.append("2ГИС по юрлицу: пропущен для карточки без ИНН")
         else:
-            checks.append("WhatsApp: нет")
-
-        await asyncio.sleep(0.3)
-        max_links = await _bing_links(
-            client, f'"{company}" {city} max.ru мессенджер'.strip()
-        )
-        max_candidates.extend([u for u in max_links if _is_max_url(u)][:8])
-        if not max_link:
-            max_link = _pick_messenger(max_links, distinctive, kind="max")
-        if max_link:
-            checks.append("Max найден")
-        else:
-            checks.append("Max: нет")
-
-        phone_2gis, maps_url = await _phones_from_2gis(client, company, city)
-        if phone_2gis:
-            _track_phone(phone_2gis, "2ГИС")
-            checks.append("Телефон с 2ГИС (сверить)")
+            phone_2gis, maps_url = await _phones_from_2gis(client, company, city)
+            if phone_2gis:
+                _track_phone(phone_2gis, "2ГИС")
+                checks.append("Телефон с 2ГИС (сверить)")
         # Extra open-web phone hunt by УК / object name
-        if len(phones) < 2:
+        if len(phones) < 2 and not object_only:
             phone_qs = [
                 f"{short_co} телефон {city}".strip(),
                 f"{obj_title} телефон {city}".strip() if obj_title else "",
@@ -2808,6 +3052,16 @@ async def enrich_contacts(
             checks.append("ВК ЛПР: отклонён (это не личный профиль)")
             vk_lpr = ""
 
+        phone_status = None
+        if phones:
+            first_phone = phones[0]
+            for src in phone_sources:
+                if not isinstance(src, dict):
+                    continue
+                if src.get("value") == first_phone and "сайт объекта" in str(src.get("source") or "").lower():
+                    phone_status = "контакт объекта"
+                    break
+
         presence = {
             "lpr": {
                 "status": "найдено" if management_label else "нет",
@@ -2816,12 +3070,24 @@ async def enrich_contacts(
                 "source": "ЕГРЮЛ",
                 "hint": "Руководитель по выписке — основной ЛПР для звонка",
             },
-            "site": _found(site_url),
-            "phone": _found(phones[0] if phones else ""),
+            "site": _found(
+                site_url,
+                status="контакт объекта" if object_contact_site else None,
+                hint="сайт найден по названию здания, не как доказательство собственника" if object_contact_site else "",
+            ),
+            "phone": _found(phones[0] if phones else "", status=phone_status),
             "email": _found(emails[0] if emails else ""),
             "vk_company": _found(vk_company),
             "vk_group": vk_group_block,
-            "vk_lpr": _found(vk_lpr),
+            "vk_lpr": (
+                {
+                    "status": "перепроверить",
+                    "value": vk_lpr,
+                    "hint": "найдено поиском по ФИО — нужно перепроверить вручную",
+                }
+                if vk_lpr and party.get("_vk_lpr_recheck")
+                else _found(vk_lpr)
+            ),
             "telegram": _found(telegram, hint=telegram_hint),
             "whatsapp": _found(whatsapp, hint=whatsapp_hint),
             "max": _found(max_link),
@@ -2832,6 +3098,106 @@ async def enrich_contacts(
             "checks": checks,
             "phone_sources": phone_sources[:8],
         }
+
+        people_contacts: list[dict[str, str]] = []
+        seen_people: set[str] = set()
+
+        def _add_person_contact(
+            name: str,
+            *,
+            role: str = "",
+            source: str = "",
+            why: str = "",
+            vk: str = "",
+        ) -> None:
+            name = re.sub(r"\s+", " ", str(name or "")).strip()
+            if not _looks_like_person_fio(name):
+                return
+            key = name.lower().replace("ё", "е")
+            if key in seen_people:
+                if vk:
+                    for item in people_contacts:
+                        if item["name"].lower().replace("ё", "е") == key and not item.get("vk"):
+                            item["vk"] = vk
+                            break
+                return
+            seen_people.add(key)
+            people_contacts.append(
+                {
+                    "name": name,
+                    "role": role or "владелец / ЛПР",
+                    "phone": "",
+                    "email": "",
+                    "vk": vk,
+                    "telegram": "",
+                    "whatsapp": "",
+                    "source": source or "ЕГРЮЛ / открытые реестры",
+                    "why": why or "кандидат для выхода на владельца/ЛПР",
+                }
+            )
+
+        if _looks_like_person_fio(fio):
+            _add_person_contact(
+                fio,
+                role=management_post or "руководитель по ЕГРЮЛ",
+                source="ЕГРЮЛ / Checko",
+                why="руководитель юрлица",
+            )
+        for extra in party.get("_people_extra") or []:
+            _add_person_contact(
+                str(extra),
+                role="связанный человек",
+                source="Checko / открытые источники",
+                why="найден рядом с юрлицом",
+            )
+        for row in party.get("founders_detail") or []:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or row.get("label") or "").strip()
+            kind = str(row.get("type") or row.get("kind") or "").upper()
+            if kind and kind not in {"PHYSICAL", "PERSON", "ФИЗЛИЦО", "ФЛ"}:
+                continue
+            share = str(row.get("share") or row.get("percent") or "").strip()
+            _add_person_contact(
+                name,
+                role=f"учредитель{f' · {share}' if share else ''}",
+                source=str(row.get("source") or "ЕГРЮЛ / Checko"),
+                why="потенциальный собственник/бенефициар",
+            )
+        if vk_lpr and _is_vk_person_url(vk_lpr):
+            assigned = False
+            for item in people_contacts[:4]:
+                if await _verify_vk_lpr_for_fio(client, vk_lpr, item["name"]):
+                    item["vk"] = vk_lpr
+                    item["why"] = (item.get("why") or "") + " · личный VK подтверждён по ФИО"
+                    assigned = True
+                    break
+            if not assigned and _looks_like_person_fio(fio):
+                _add_person_contact(
+                    fio,
+                    role=management_post or "руководитель по ЕГРЮЛ",
+                    source="поиск VK по ФИО",
+                    why="личный VK требует ручной перепроверки",
+                    vk=vk_lpr,
+                )
+
+        actionable_people = [
+            p for p in people_contacts if p.get("phone") or p.get("email") or p.get("vk") or p.get("telegram") or p.get("whatsapp")
+        ]
+        presence["people"] = {
+            "status": "найдено" if actionable_people else ("кандидаты" if people_contacts else "нет"),
+            "value": people_contacts[:8],
+            "source": "ЕГРЮЛ / Checko / поиск личных профилей",
+            "hint": (
+                "личный канал найден"
+                if actionable_people
+                else "ФИО есть, личные телефон/email/мессенджер не подтверждены"
+            ),
+        }
+        checks.append(
+            f"Личные контакты: найдено людей {len(people_contacts)}, с личным каналом {len(actionable_people)}"
+        )
+        presence["checks"] = checks
 
         photos: list[str] = []
         address = str(party.get("address") or "")
@@ -2883,7 +3249,7 @@ async def enrich_contacts(
 
             from app.cost_guard import llm_verify_enabled
 
-            if llm_verify_enabled():
+            if llm_verify_enabled(force=deep_verify):
                 from app.verify import investigate_presence
 
                 presence = await investigate_presence(
@@ -2908,9 +3274,14 @@ async def enrich_contacts(
                         "web_lpr": _uniq(web_lpr_candidates, 6),
                     },
                 )
+                if deep_verify:
+                    checks = list(presence.get("checks") or [])
+                    checks.append("RouterAI: доп. проверка выполнена (без web-plugin)")
+                    presence["checks"] = checks
             else:
                 checks.append(
-                    "LLM-проверка выключена (HUNT_LLM_VERIFY=0) — только подтверждённые поля"
+                    "LLM-проверка выключена — массовая охота в cheap mode; "
+                    "включи deep_verify или HUNT_CHEAP_MODE=0+HUNT_LLM_VERIFY=1"
                 )
                 presence["checks"] = checks
             site_url = (presence.get("site") or {}).get("value") or ""
@@ -2954,8 +3325,18 @@ async def enrich_contacts(
                         checks = list(presence.get("checks") or [])
                         checks.append(f"ВК ЛПР после LLM: подтверждён по ФИО «{person}»")
                         presence["checks"] = checks
+                        presence["vk_lpr"] = _found(vk_lpr)
                         break
-                if not person_ok or not _is_vk_person_url(vk_lpr):
+                if not person_ok and _is_vk_person_url(vk_lpr):
+                    checks = list(presence.get("checks") or [])
+                    checks.append(f"ВК ЛПР после LLM: оставить с пометкой перепроверить: {vk_lpr}")
+                    presence["checks"] = checks
+                    presence["vk_lpr"] = {
+                        "status": "перепроверить",
+                        "value": vk_lpr,
+                        "hint": "нужно перепроверить вручную",
+                    }
+                elif not _is_vk_person_url(vk_lpr):
                     checks = list(presence.get("checks") or [])
                     checks.append(f"ВК ЛПР после LLM отклонён: {vk_lpr}")
                     presence["checks"] = checks
@@ -3131,6 +3512,7 @@ async def enrich_contacts(
         party["emails"] = emails[:5]
         party["sites"] = sites[:5]
         party["photos"] = photos[:6]
+        party["people_contacts"] = people_contacts[:8]
         party["contact_routes"] = routes
         party["presence"] = presence
         party["online_hits"] = online_hits
@@ -3141,6 +3523,7 @@ async def enrich_contacts(
                 "emails": emails[:5],
                 "sites": sites[:5],
                 "photos": photos[:6],
+                "people_contacts": people_contacts[:8],
                 "contact_routes": routes,
                 "presence": presence,
                 "online_hits": online_hits,

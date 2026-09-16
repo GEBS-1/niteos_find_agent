@@ -1,6 +1,9 @@
 .env
 .env.*
 !.env.example
+**/.env
+**/.env.*
+!**/.env.example
 .venv/
 venv/
 __pycache__/
@@ -19,6 +22,7 @@ data/**/*.db
 data/**/*.sqlite
 data/**/*.sqlite3
 data/**/*.db-*
+data/*.bak*
 data/runtime-*/
 data/*.json
 data/*.log
@@ -30,7 +34,9 @@ data/*.csv
 node_modules/
 .idea/
 .vscode/
+.cursor/
 *.log
+*.zip
 
 # local scratch / clones
 tmp_*/
